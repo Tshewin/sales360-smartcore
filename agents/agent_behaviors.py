@@ -171,3 +171,164 @@ def generate_agent_action(lead: LeadData, routing_result: dict, scoring_result: 
         ),
         "notes": "Low-priority / long-term nurture touch."
     }
+
+def post_call_followup_agent_message(
+    lead: LeadData, 
+    scenario: str = "confirmation", 
+    last_touch_channel: str | None = None
+) -> dict:
+
+    """
+    Post-call follow-up agent.
+    Scenarios:
+      - confirmation  -> right after booking the call
+      - reminder      -> before the call happens
+      - missed_call   -> when they didn't pick up
+      - no_show       -> when they didn't attend a scheduled meeting
+      - after_call    -> after a successful strategy session
+    """
+
+    region = (lead.country_region or "").upper() or "YOUR MARKET"
+    industry = lead.industry_type or "your business"
+
+    scenario = (scenario or "confirmation").lower().strip()
+    preferred_channel = (last_touch_channel or "whatsapp").lower()
+
+
+    if scenario == "confirmation":
+        message = (
+            "Awesome — your Sales360 strategy session is booked. 🙌\n\n"
+            f"For your {industry} setup in {region}, we’ll use this call to:\n"
+            "• Understand how you're currently handling leads\n"
+            "• Identify where money is being left on the table\n"
+            "• Show you how AI agents + automation could plug those gaps\n\n"
+            "If anything changes before the call, just reply here and we’ll adjust the time.\n"
+            "Looking forward to speaking with you."
+        )
+        notes = "Sent immediately after booking to confirm and set expectations."
+
+    elif scenario == "reminder":
+        message = (
+            "Quick reminder about your upcoming Sales360 strategy session. ⏰\n\n"
+            f"We’ll be looking at your {industry} flow in {region} and mapping where AI + automation can give you quick wins.\n\n"
+            "If the timing is still perfect, no need to reply — we’ll call as scheduled.\n"
+            "If you’d like to shift the time slightly, just reply here with a better slot."
+        )
+        notes = "Reminder before the scheduled call (e.g. 1–2 hours before)."
+
+    elif scenario == "missed_call":
+        message = (
+            "We tried to reach you for the Sales360 call but couldn’t get through — no worries at all.\n\n"
+            "I know how busy things can get, especially when you're running a growing business.\n\n"
+            "To keep things simple, would you prefer to:\n"
+            "• Reschedule for a later time today\n"
+            "• Pick another day this week\n"
+            "• Or move this to WhatsApp/email instead of a live call?\n\n"
+            "Reply with what works best for you and we’ll sort it out."
+        )
+        notes = "Used when the call was attempted but not picked."
+
+
+    elif scenario == "no_show":
+        message = (
+            "We had a Sales360 strategy session booked, but it looks like the timing didn’t work out — "
+            "no worries at all, these things happen.\n\n"
+            "If you’re still interested in optimising your sales process, we can:\n"
+            "• Book a fresh slot that fits your schedule better\n"
+            "• Or send you a short, personalised video walkthrough you can watch in your own time\n\n"
+            "Which option works best for you?"
+        )
+        notes = "Used when a booked Zoom/meeting was missed completely."
+
+    elif scenario == "after_call":
+        message = (
+            "Thank you for taking the time to jump on the Sales360 call — really appreciate the openness.\n\n"
+            "As a quick recap, we discussed:\n"
+            "• Where leads are currently being lost\n"
+            "• The key automations/AI agents that could help\n"
+            "• The next steps that would give you the fastest win\n\n"
+            "I’ll follow up with a short summary so you can share it internally.\n"
+            "In the meantime, if any other questions pop up, just reply here — I’ve got you."
+        )           
+        notes = "Used after a successful call to close the loop."
+
+    else:
+        message = (
+            "Just checking in regarding your Sales360 session.\n\n"
+            "If you’d still like help improving your sales process with AI + automation, "
+            "you can reply here with a good time and we’ll take it from there."
+        )
+        notes = "Fallback scenario for unknown / custom follow-ups."
+
+
+    preferred_channel = (last_touch_channel or "whatsapp").lower()
+
+    return {
+        "agent": "post_call_followup_agent",
+        "channel_suggestion": preferred_channel,
+        "message_type": f"post_call_{scenario}",
+        "message": message,
+        "notes": notes,
+    }
+
+
+def reengagement_agent_message(
+    lead: LeadData,
+    days_inactive: int = 14,
+    last_touch_channel: str | None = None,
+) -> dict:
+    """
+    Re-engagement agent for leads that have gone quiet.
+    Tone and message vary slightly based on how long they've been inactive.
+    """
+
+    region = (lead.country_region or "").upper() or "YOUR MARKET"
+    industry = lead.industry_type or "your business"
+    channel = (last_touch_channel or "WhatsApp").lower()
+
+    # Short, medium, and long inactivity buckets
+    if days_inactive <= 7:
+        # Recently inactive – soft nudge
+        message = (
+            "Just checking in quickly 😊\n\n"
+            f"We spoke recently about improving your {industry} sales flow in {region}, "
+            "and I didn’t want our last conversation to get lost in the busyness of the week.\n\n"
+            "If it’s still on your mind, we can:\n"
+            "• Pick up from where we stopped\n"
+            "• Or I can send a short summary of what we discussed so far\n\n"
+            "What would be most helpful for you right now?"
+        )
+        notes = "Re-engagement for mildly inactive lead (≤ 7 days)."
+
+    elif days_inactive <= 30:
+        # Medium idle – re-open the opportunity
+        message = (
+            "Hope you’ve been keeping well.\n\n"
+            f"A little while ago we started exploring how Sales360 could support your {industry} sales process in {region}.\n"
+            "I know priorities can shift, so I wanted to check in without any pressure.\n\n"
+            "If you’re still curious, we can:\n"
+            "• Look at a very light starting point\n"
+            "• Or I can share a short case-style example of how similar businesses approached this\n\n"
+            "Would you like to revisit this, or should we pause it for now?"
+        )
+        notes = "Re-engagement for lead inactive 8–30 days."
+
+    else:
+        # Long idle – respectful, almost “closing the file”
+        message = (
+            "It’s been a little while since we last spoke about Sales360, "
+            "so I wanted to quickly close the loop.\n\n"
+            f"If optimising your {industry} sales flow in {region} is still on your radar, "
+            "I’d be happy to share an updated, very lean way to get started.\n\n"
+            "If not, no worries at all — we can simply keep the door open for the future.\n\n"
+            "What feels right for you at this stage?"
+        )
+        notes = "Re-engagement for long inactive lead (> 30 days)."
+
+    return {
+        "agent": "reengagement_agent",
+        "channel_suggestion": channel,
+        "message_type": "reengagement",
+        "message": message,
+        "notes": notes,
+    }
