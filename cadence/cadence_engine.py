@@ -55,12 +55,12 @@ def decide_next_agent(
     last_outcome: str | None = None,
 ) -> dict:
     """
-    Cadence Engine v1
-    Decides which agent should act next based on lead state.
+    Cadence Engine v1.1
+    Adds deterministic entry routing using call_decision/intent_level.
     """
 
-    intent = scoring_result.get("intent_level", "Warm")
-
+    intent = scoring_result.get("intent_level", "Warm")  # Hot/Warm/Cold
+    call_decision = (scoring_result.get("call_decision") or "").lower()
 
     signal_strength = scoring_result.get("signal_strength", "Medium")
     region = lead.country_region
@@ -70,16 +70,39 @@ def decide_next_agent(
         region=region,
     )
 
+    # =====================================================
+    # ENTRY ROUTING (NEW) — handles fresh leads (last_agent=None)
+    # =====================================================
+    # Hot + call_now should always produce an action
+    if (intent == "Hot" or call_decision == "call_now") and (last_agent is None or last_agent == ""):
+        return {
+            "next_agent": "appointment_agent",
+            "scenario": "intake",
+            "reason": "Hot lead entry: trigger appointment agent for call prep + WhatsApp opener.",
+            "cadence_profile": cadence_profile,
+        }
 
+    # Warm / call_after_intake entry routing
+    if (intent == "Warm" or call_decision == "call_after_intake") and (last_agent is None or last_agent == ""):
+        return {
+            "next_agent": "appointment_agent",
+            "scenario": "intake",
+            "reason": "Warm lead entry: trigger appointment agent for intake + outreach.",
+            "cadence_profile": cadence_profile,
+        }
 
+    # =====================================================
+    # Existing rules (your logic) — preserved
+    # =====================================================
 
+    # Fix: your early Hot block did not include cadence_profile
     if intent == "Hot" and last_agent == "appointment_agent" and days_inactive >= 3 and days_inactive < 7:
         return {
             "next_agent": "post_call_followup_agent",
             "scenario": "reminder",
-            "reason": "Hot lead: gentle reminder before switching to re-engagement."
+            "reason": "Hot lead: gentle reminder before switching to re-engagement.",
+            "cadence_profile": cadence_profile,
         }
-
 
     # -------------------------------
     # Missed call or no-show handling
@@ -89,7 +112,7 @@ def decide_next_agent(
             "next_agent": "post_call_followup_agent",
             "scenario": "missed_call",
             "reason": "Call was attempted but not picked.",
-            "cadence_profile": cadence_profile
+            "cadence_profile": cadence_profile,
         }
 
     if last_outcome == "no_show":
@@ -97,7 +120,7 @@ def decide_next_agent(
             "next_agent": "post_call_followup_agent",
             "scenario": "no_show",
             "reason": "Lead did not attend scheduled meeting.",
-            "cadence_profile": cadence_profile
+            "cadence_profile": cadence_profile,
         }
 
     if last_outcome == "after_call":
@@ -105,17 +128,16 @@ def decide_next_agent(
             "next_agent": "post_call_followup_agent",
             "scenario": "after_call",
             "reason": "Send recap and next steps after a successful call.",
-            "cadence_profile": cadence_profile
+            "cadence_profile": cadence_profile,
         }
-    
+
     if last_outcome == "reminder":
         return {
             "next_agent": "post_call_followup_agent",
             "scenario": "reminder",
             "reason": "Send a reminder message before the scheduled call.",
-            "cadence_profile": cadence_profile
+            "cadence_profile": cadence_profile,
         }
-
 
     # -------------------------------
     # Hot lead follow-up logic
@@ -123,39 +145,37 @@ def decide_next_agent(
     if intent == "Hot" and last_agent == "ai_call_agent" and days_inactive >= 1:
         return {
             "next_agent": "appointment_agent",
+            "scenario": "intake",
             "reason": "Hot lead inactive after call attempt.",
-            "cadence_profile": cadence_profile
+            "cadence_profile": cadence_profile,
         }
 
-    # -------------------------------
     # -------------------------------
     # Appointment follow-up cadence
     # -------------------------------
     if last_agent == "appointment_agent":
-        # Day 1: gentle reminder
         if days_inactive == 1:
             return {
                 "next_agent": "post_call_followup_agent",
                 "scenario": "reminder",
                 "reason": "Reminder 1 day after appointment outreach.",
-                "cadence_profile": cadence_profile
+                "cadence_profile": cadence_profile,
             }
 
-        # Day 3–6: second reminder for Hot leads (optional but effective)
         if intent == "Hot" and 3 <= days_inactive < 7:
             return {
                 "next_agent": "post_call_followup_agent",
                 "scenario": "reminder",
                 "reason": "Hot lead: reminder before switching to re-engagement.",
-                "cadence_profile": cadence_profile
+                "cadence_profile": cadence_profile,
             }
 
-    # Day 7+: switch to re-engagement
     if days_inactive >= 7:
         return {
             "next_agent": "reengagement_agent",
-            "reason": "No response after reminders. Switching to re-engagement.",            
-            "cadence_profile": cadence_profile
+            "scenario": "7_days_inactive",
+            "reason": "No response after reminders. Switching to re-engagement.",
+            "cadence_profile": cadence_profile,
         }
 
     # -------------------------------
@@ -164,22 +184,22 @@ def decide_next_agent(
     if days_inactive >= 30:
         return {
             "next_agent": "reengagement_agent",
+            "scenario": "30_days_inactive",
             "reason": "Lead inactive for over 30 days.",
-            "cadence_profile": cadence_profile
+            "cadence_profile": cadence_profile,
         }
 
     if days_inactive >= 14:
         return {
             "next_agent": "reengagement_agent",
+            "scenario": "14_days_inactive",
             "reason": "Lead inactive for over 14 days.",
-            "cadence_profile": cadence_profile
+            "cadence_profile": cadence_profile,
         }
 
-    # -------------------------------
-    # Default: do nothing
-    # -------------------------------
     return {
         "next_agent": None,
         "reason": "No cadence action required at this time.",
-        "cadence_profile": cadence_profile
+        "cadence_profile": cadence_profile,
     }
+

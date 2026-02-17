@@ -91,53 +91,65 @@ def ai_call_agent_script(lead: LeadData, scoring_result: dict) -> dict:
 
 def appointment_agent_message(lead: LeadData, scoring_result: dict | None = None) -> dict:
     """
-    Message to lock in a specific call time.
-    Tone adapts slightly based on intent (Hot vs Warm).
+    Hybrid Agent Output:
+    - Internal Call Script (for human)
+    - WhatsApp opener (for outbound message)
     """
 
     intent = (scoring_result or {}).get("intent_level", "Warm") or "Warm"
     region = (lead.country_region or "").upper() or "YOUR MARKET"
     industry = lead.industry_type or "your type of business"
+    name = getattr(lead, "full_name", None) or "there"
+    company = getattr(lead, "company", None) or ""
+    title = getattr(lead, "title", None) or ""
+    pain = getattr(lead, "current_challenges", None) or ""
 
+    # =========================
+    # CALL SCRIPT (Internal)
+    # =========================
+    call_script = (
+        f"CALL SCRIPT (30–45 seconds)\n\n"
+        f"Hi {name}, Chuks here from Sales360.\n\n"
+        f"I’m reaching out because we help {industry} teams in {region} tighten up their lead follow-up "
+        f"so high-intent prospects don’t leak through slow response times.\n\n"
+        f"Quick question — are you currently confident that your hottest leads get contacted within minutes, not hours?\n\n"
+        f"If useful, I can walk you through a 10-minute breakdown showing exactly how the Sales360 AI flow "
+        f"would sit on top of your current process."
+    )
+
+    # =========================
+    # WHATSAPP OPENER (Outbound)
+    # =========================
     if intent == "Hot":
-        # More direct, faster timeline
-        message = (
-            "Brilliant — let’s lock in a quick strategy session so we don’t lose momentum.\n\n"
-            f"For your {industry} business in the {region}, we’ll use this call to:\n"
-            "• Map your ideal Sales360 flow\n"
-            "• Highlight the quickest wins\n"
-            "• Show you exactly how the AI agents would work day-to-day\n\n"
-            "Here are a few slots you can pick from:\n"
-            "• Today or tomorrow morning\n"
-            "• Today or tomorrow afternoon\n"
-            "• Or a specific time that works better for you\n\n"
-            "Reply with your preferred option (e.g. 'tomorrow 11am UK time') and we’ll confirm the calendar invite."
+        whatsapp = (
+            f"Hi {name}, Chuks here from Sales360.\n\n"
+            f"Noticed you’re leading growth at {company or 'your team'} in {region}. "
+            f"We help {industry} businesses automate lead scoring + follow-up so hot prospects don’t cool off.\n\n"
+            f"Open to a quick 10-min strategy call today or tomorrow?"
         )
-        notes = "High-intent lead. Offer very near-term slots and clear next step."
+        notes = "Hot lead — push for immediate booking."
     else:
-        # Warm / unsure leads – softer and more open
-        message = (
-            "Great — the next simple step is to schedule a short Sales360 strategy session.\n\n"
-            f"We’ll walk through your current {industry} setup in {region} and:\n"
-            "• Identify where leads are being lost\n"
-            "• Show how AI agents + automation can plug those gaps\n"
-            "• Outline a realistic rollout that fits your stage\n\n"
-            "What usually works best is to pick a time this week that’s not too busy for you.\n\n"
-            "You can reply with:\n"
-            "• A morning window\n"
-            "• An afternoon window\n"
-            "• Or a specific day + time that suits you\n\n"
-            "Once you share that, we’ll confirm and send over a calendar invite."
+        whatsapp = (
+            f"Hi {name}, Chuks here.\n\n"
+            f"We’ve been helping {industry} teams in {region} clean up their lead follow-up and qualification flow.\n\n"
+            f"If relevant, I’d be happy to show you what that would look like for {company or 'your setup'}.\n\n"
+            f"Would sometime this week work for a short chat?"
         )
-        notes = "Warm lead. Encourage booking this week with flexible time options."
+        notes = "Warm lead — softer booking tone."
+
+    if pain:
+        whatsapp += f"\n\n(P.S. Saw this challenge mentioned: \"{pain}\")"
+
+    combined_message = call_script + "\n\n---\n\nWHATSAPP VERSION\n\n" + whatsapp
 
     return {
         "agent": "appointment_agent",
-        "channel_suggestion": "whatsapp",
-        "message_type": "appointment",
-        "message": message,
+        "channel_suggestion": "call_and_whatsapp",
+        "message_type": "action_required",
+        "message": combined_message,
         "notes": notes,
     }
+
 
 
 def generate_agent_action(lead: LeadData, routing_result: dict, scoring_result: dict) -> dict:
