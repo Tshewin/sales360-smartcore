@@ -107,6 +107,17 @@ def decide_next_agent(
     # -------------------------------
     # Missed call or no-show handling
     # -------------------------------
+    # -------------------------------
+    # Reply handling (stop automation)
+    # -------------------------------
+    if last_outcome == "replied":
+        return {
+            "next_agent": None,
+            "reason": "Lead replied — pause automation and hand over to human.",
+            "cadence_profile": cadence_profile,
+        }
+
+
     if last_outcome == "missed_call":
         return {
             "next_agent": "post_call_followup_agent",
