@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from models.lead_model import LeadData
 from scoring.scoring_engine import score_lead
 from agents.routing_engine import route_lead
+from zoho.routes import router as zoho_router
 from agents.agent_behaviors import generate_agent_action
 from agents.agent_behaviors import (
     generate_agent_action,
@@ -50,6 +51,10 @@ app = FastAPI(
     description="AI scoring and routing engine for Sales360",
     version="0.1.0",
 )
+
+# ── NEW: Register Zoho CRM router ──────────────────────────────────────────
+app.include_router(zoho_router)
+# ──────────────────────────────────────────────────────────────────────────
 
 
 @app.get("/")
