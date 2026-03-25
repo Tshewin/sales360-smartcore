@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from models.lead_model import LeadData
 from scoring.scoring_engine import score_lead
@@ -52,9 +53,17 @@ app = FastAPI(
     version="0.1.0",
 )
 
-# ── NEW: Register Zoho CRM router ──────────────────────────────────────────
+# ── CORS — allows the dashboard to call SmartCore from the browser ─────────
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],          # tighten to your domain after hosting
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ── Zoho CRM router ───────────────────────────────────────────────────────
 app.include_router(zoho_router)
-# ──────────────────────────────────────────────────────────────────────────
 
 
 @app.get("/")
