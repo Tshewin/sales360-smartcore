@@ -1,0 +1,22 @@
+{
+  "name": "sales360-websocket-server",
+  "version": "1.0.0",
+  "description": "Sales360 WebSocket Server - Real-time Demo & Dashboard sync",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "keywords": [
+    "websocket",
+    "sales360",
+    "real-time"
+  ],
+  "author": "Chuks Obiri",
+  "license": "MIT"
+}
