@@ -104,14 +104,12 @@ const wsServer = {
 // TWILIO PHONE INTEGRATION
 // ═══════════════════════════════════════════════════════════
 
-// Import and setup call routes
 const setupCallRoutes = require('./call-routes');
 const callRoutes = setupCallRoutes(wsServer);
 
-// Mount routes - CRITICAL: mount on root app, not nested
-app.use(callRoutes);
-
-console.log('[Setup] Call routes mounted');
+// Mount Twilio routes
+app.use('/api', callRoutes);
+app.use('/twilio', callRoutes);
 
 // ═══════════════════════════════════════════════════════════
 // HEALTH CHECK
