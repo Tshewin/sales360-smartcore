@@ -14,7 +14,7 @@ function setupCallRoutes(wsServer) {
   // ═══════════════════════════════════════════════════════════
 
   // Make outbound call
-  router.post('/api/call/make', async (req, res) => {
+  router.post('/call/make', async (req, res) => {
     try {
       const { to, prospectName, region, scenario } = req.body;
 
@@ -43,7 +43,7 @@ function setupCallRoutes(wsServer) {
   });
 
   // End call
-  router.post('/api/call/end/:callSid', async (req, res) => {
+  router.post('/call/end/:callSid', async (req, res) => {
     try {
       const { callSid } = req.params;
       const result = await twilioService.endCall(callSid);
@@ -58,7 +58,7 @@ function setupCallRoutes(wsServer) {
   });
 
   // Get active calls
-  router.get('/api/call/active', (req, res) => {
+  router.get('/call/active', (req, res) => {
     try {
       const calls = twilioService.getActiveCalls();
       res.json({ success: true, calls });
@@ -72,7 +72,7 @@ function setupCallRoutes(wsServer) {
   });
 
   // Get call details
-  router.get('/api/call/:callSid', (req, res) => {
+  router.get('/call/:callSid', (req, res) => {
     try {
       const { callSid } = req.params;
       const call = twilioService.getCallDetails(callSid);
