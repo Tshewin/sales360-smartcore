@@ -2,7 +2,6 @@
  * Sales360 SmartCore - WebSocket + Twilio Server
  * Handles real-time Dashboard sync + Phone calls
  */
-
 const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
@@ -17,188 +16,166 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// WebSocket API key (for Dashboard authentication)
-const WS_API_KEY = process.env.WS_API_KEY || '348bfe2c06cfb611c6240a83b8b850f4683908d2eb05d450b01b5a760c3c3dee';
+// ═══════════════════════════════════════════════════════════
+// WEBSOCKET SERVER (Dashboard Real-time Sync)
+// ═══════════════════════════════════════════════════════════
 
-// Store connected clients
-const clients = new Map();
+const API_KEY = process.env.WEBSOCKET_API_KEY || '348bfe2c06cfb611c6240a83b8b850f4683908d2eb05d450b01b5a760c3c3dee';
+const clients = new Set();
 
-// ═══════════════════════════════════════════════════
-// WEBSOCKET SERVER (existing Demo sync)
-// ═══════════════════════════════════════════════════
-
-wss.on('connection', (ws) => {
-  let clientId = null;
-  let clientType = null;
-  let authenticated = false;
+wss.on('connection', (ws, req) => {
+  console.log('[WebSocket] New connection attempt');
 
   ws.on('message', (message) => {
     try {
       const data = JSON.parse(message);
 
-      // Handle authentication
+      // API Key authentication
       if (data.type === 'auth') {
-        if (data.apiKey !== WS_API_KEY) {
-          ws.send(JSON.stringify({ type: 'authFailed', reason: 'Invalid API key' }));
+        if (data.apiKey === API_KEY) {
+          ws.authenticated = true;
+          clients.add(ws);
+          ws.send(JSON.stringify({ type: 'auth', status: 'success' }));
+          console.log('[WebSocket] Client authenticated. Total clients:', clients.size);
+        } else {
+          ws.send(JSON.stringify({ type: 'auth', status: 'failed', error: 'Invalid API key' }));
           ws.close();
-          return;
         }
-
-        authenticated = true;
-        clientId = `client_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-        clientType = data.clientType || 'unknown';
-
-        clients.set(clientId, { ws, type: clientType, connectedAt: new Date() });
-
-        ws.send(JSON.stringify({ type: 'authSuccess', clientId, clientType }));
-        console.log(`✓ Auth success - ${clientType} (${clientId})`);
-
-        // Broadcast client connection
-        broadcast({
-          type: 'clientConnected',
-          clientId,
-          clientType,
-          timestamp: new Date().toISOString()
-        }, clientId);
-
         return;
       }
 
-      // Reject unauthenticated messages
-      if (!authenticated) {
+      // Only process messages from authenticated clients
+      if (!ws.authenticated) {
         ws.send(JSON.stringify({ type: 'error', message: 'Not authenticated' }));
         return;
       }
 
-      // Handle events from Demo
-      if (data.type === 'event') {
-        console.log(`Event: ${data.event} from ${clientId}`);
-        
-        // Broadcast to all clients (especially Dashboard)
-        broadcast({
-          type: 'event',
-          event: data.event,
-          payload: data.payload,
-          timestamp: new Date().toISOString()
-        }, clientId);
+      // Handle ping/pong
+      if (data.type === 'ping') {
+        ws.send(JSON.stringify({ type: 'pong', timestamp: Date.now() }));
+        return;
       }
 
+      // Broadcast events to all clients (Demo → Dashboard sync)
+      broadcast(data);
+      
     } catch (error) {
-      console.error('WebSocket error:', error);
-      ws.send(JSON.stringify({ type: 'error', message: 'Invalid message format' }));
+      console.error('[WebSocket] Error processing message:', error);
     }
   });
 
   ws.on('close', () => {
-    if (clientId) {
-      console.log(`Disconnect - ${clientType} (${clientId}) - Code: 1006`);
-      clients.delete(clientId);
-      
-      // Broadcast disconnection
-      broadcast({
-        type: 'clientDisconnected',
-        clientId,
-        clientType,
-        timestamp: new Date().toISOString()
-      });
-    }
+    clients.delete(ws);
+    console.log('[WebSocket] Client disconnected. Total clients:', clients.size);
   });
 
   ws.on('error', (error) => {
-    console.error('WebSocket error:', error);
+    console.error('[WebSocket] WebSocket error:', error);
+    clients.delete(ws);
   });
 });
 
-// Broadcast to all connected clients except sender
-function broadcast(message, excludeClientId = null) {
-  const messageStr = JSON.stringify(message);
-  let sentCount = 0;
-
-  clients.forEach((client, id) => {
-    if (id !== excludeClientId && client.ws.readyState === WebSocket.OPEN) {
-      client.ws.send(messageStr);
-      sentCount++;
+// Broadcast function - send to all authenticated clients
+function broadcast(data) {
+  const message = JSON.stringify(data);
+  let successCount = 0;
+  
+  clients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN && client.authenticated) {
+      try {
+        client.send(message);
+        successCount++;
+      } catch (error) {
+        console.error('[WebSocket] Error sending to client:', error);
+      }
     }
   });
-
-  if (sentCount > 0) {
-    console.log(`Broadcast: ${message.type || message.event} → ${sentCount} clients`);
-  }
+  
+  console.log(`[WebSocket] Broadcast: ${data.type} → ${successCount} clients`);
 }
 
-// Heartbeat to keep connections alive
-setInterval(() => {
-  const activeCount = clients.size;
-  if (activeCount > 0) {
-    console.log(`Heartbeat: ${activeCount} active connections`);
-  }
-}, 30000);
+// Expose broadcast to Twilio service
+const wsServer = {
+  broadcast: broadcast,
+  clients: clients
+};
 
-// ═══════════════════════════════════════════════════
-// TWILIO CALL ROUTES (NEW)
-// ═══════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
+// TWILIO PHONE INTEGRATION
+// ═══════════════════════════════════════════════════════════
 
-const callRoutes = require('./call-routes');
+const setupCallRoutes = require('./call-routes');
+const callRoutes = setupCallRoutes(wsServer);
 
-// Mount call routes
-app.use('/api/call', callRoutes);
-app.use('/twilio', callRoutes); // Twilio webhooks
+// Mount Twilio routes
+app.use('/api', callRoutes);
+app.use('/twilio', callRoutes);
 
-// ═══════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
 // HEALTH CHECK
-// ═══════════════════════════════════════════════════
-
-app.get('/', (req, res) => {
-  res.json({
-    service: 'Sales360 SmartCore',
-    status: 'running',
-    websocket: 'active',
-    twilio: 'active',
-    clients: clients.size,
-    uptime: process.uptime()
-  });
-});
+// ═══════════════════════════════════════════════════════════
 
 app.get('/health', (req, res) => {
   res.json({
     status: 'healthy',
     timestamp: new Date().toISOString(),
-    connections: {
-      websocket: clients.size,
-      active: Array.from(clients.values()).map(c => c.type)
+    websocket: {
+      active: true,
+      clients: clients.size
+    },
+    twilio: {
+      active: true,
+      phoneNumber: process.env.TWILIO_PHONE_NUMBER || 'not configured'
     }
   });
 });
 
-// ═══════════════════════════════════════════════════
-// START SERVER
-// ═══════════════════════════════════════════════════
-
-const PORT = process.env.PORT || 3000;
-
-server.listen(PORT, () => {
-  console.log(`
-╔════════════════════════════════════════════════════╗
-║                                                    ║
-║           Sales360 SmartCore Server                ║
-║                                                    ║
-║  WebSocket: wss://successful-strength...railway.app║
-║  HTTP: Port ${PORT}                                  ║
-║  Twilio: Active                                    ║
-║                                                    ║
-╚════════════════════════════════════════════════════╝
-  `);
-  
-  console.log('[SmartCore] Server started successfully');
-  console.log('[SmartCore] WebSocket endpoint ready');
-  console.log('[SmartCore] Twilio integration ready');
+app.get('/', (req, res) => {
+  res.json({
+    service: 'Sales360 SmartCore',
+    version: '2.0.0',
+    features: ['WebSocket Real-time Sync', 'Twilio Phone Integration'],
+    endpoints: {
+      websocket: 'wss://<host>',
+      health: '/health',
+      call: {
+        make: 'POST /api/call/make',
+        end: 'POST /api/call/end/:callSid',
+        active: 'GET /api/call/active',
+        details: 'GET /api/call/:callSid'
+      },
+      webhooks: {
+        voice: 'POST /twilio/voice',
+        gather: 'POST /twilio/gather',
+        status: 'POST /twilio/status',
+        recording: 'POST /twilio/recording'
+      }
+    }
+  });
 });
 
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('[SmartCore] SIGTERM received, shutting down gracefully');
-  server.close(() => {
-    console.log('[SmartCore] Server closed');
-    process.exit(0);
-  });
+// ═══════════════════════════════════════════════════════════
+// START SERVER
+// ═══════════════════════════════════════════════════════════
+
+const PORT = process.env.PORT || 8080;
+
+server.listen(PORT, () => {
+  console.log('\n╔═══════════════════════════════════════════════════════╗');
+  console.log('║   SALES360 SMARTCORE - REAL-TIME ENGINE               ║');
+  console.log('╚═══════════════════════════════════════════════════════╝\n');
+  console.log('[SmartCore] Server started successfully');
+  console.log('[SmartCore] Port:', PORT);
+  console.log('[SmartCore] WebSocket endpoint ready');
+  console.log('[SmartCore] Twilio integration ready');
+  console.log('[SmartCore] Health check: /health\n');
+  
+  // Log Twilio status
+  if (process.env.TWILIO_PHONE_NUMBER) {
+    console.log('[Twilio Service] Initialized with number:', process.env.TWILIO_PHONE_NUMBER);
+    console.log('Twilio: Active ✓\n');
+  } else {
+    console.log('[Twilio Service] WARNING: TWILIO_PHONE_NUMBER not configured');
+    console.log('Twilio: Inactive ✗\n');
+  }
 });
