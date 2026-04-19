@@ -1,64 +1,66 @@
-/**
- * Sales360 - Twilio Phone Integration Service
- * Handles inbound/outbound calls with AI conversation
- */
+// ═══════════════════════════════════════════════════════════
+// SALES360 TWILIO SERVICE - REAL AI CONVERSATION ENGINE
+// ═══════════════════════════════════════════════════════════
 
 const twilio = require('twilio');
+const VoiceResponse = twilio.twiml.VoiceResponse;
 
 class TwilioService {
   constructor() {
     this.accountSid = process.env.TWILIO_ACCOUNT_SID;
     this.authToken = process.env.TWILIO_AUTH_TOKEN;
     this.phoneNumber = process.env.TWILIO_PHONE_NUMBER;
-    this.client = twilio(this.accountSid, this.authToken);
+    this.webhookBaseUrl = process.env.WEBHOOK_BASE_URL;
+    this.anthropicApiKey = process.env.ANTHROPIC_API_KEY;
     
-    this.activeCalls = new Map(); // Store active call data
+    if (!this.accountSid || !this.authToken || !this.phoneNumber) {
+      throw new Error('[Twilio Service] Missing required environment variables');
+    }
+    
+    this.client = twilio(this.accountSid, this.authToken);
+    this.activeCalls = new Map();
     
     console.log('[Twilio Service] Initialized with number:', this.phoneNumber);
   }
 
-  /**
-   * Make outbound call
-   * @param {string} to - Phone number to call (E.164 format: +1234567890)
-   * @param {object} callData - Call metadata (prospectName, region, scenario, etc.)
-   * @param {string} webhookBaseUrl - Base URL for Twilio webhooks
-   */
-  async makeCall(to, callData, webhookBaseUrl) {
+  // ═══════════════════════════════════════════════════════════
+  // MAKE OUTBOUND CALL
+  // ═══════════════════════════════════════════════════════════
+  async makeCall({ to, prospectName, region, scenario }) {
     try {
-      console.log(`[Twilio] Making call to ${to}`);
-      
+      const callData = {
+        prospectName,
+        region,
+        scenario,
+        conversationHistory: [],
+        startTime: new Date().toISOString(),
+        intentScore: this._getStartingScore(scenario)
+      };
+
       const call = await this.client.calls.create({
+        url: `${this.webhookBaseUrl}/twilio/voice?prospectName=${encodeURIComponent(prospectName)}&region=${encodeURIComponent(region)}&scenario=${encodeURIComponent(scenario)}`,
         to: to,
         from: this.phoneNumber,
-        url: `${webhookBaseUrl}/twilio/voice`, // TwiML endpoint
-        statusCallback: `${webhookBaseUrl}/twilio/status`,
+        statusCallback: `${this.webhookBaseUrl}/twilio/status`,
         statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
         statusCallbackMethod: 'POST',
-        record: true, // Record the call
-        recordingStatusCallback: `${webhookBaseUrl}/twilio/recording`,
+        record: true,
+        recordingStatusCallback: `${this.webhookBaseUrl}/twilio/recording`,
         recordingStatusCallbackMethod: 'POST'
       });
 
-      // Store call data
-      this.activeCalls.set(call.sid, {
-        sid: call.sid,
-        to: to,
-        from: this.phoneNumber,
-        status: 'initiated',
-        startTime: new Date(),
-        ...callData
-      });
-
-      console.log(`[Twilio] Call initiated: ${call.sid}`);
+      this.activeCalls.set(call.sid, callData);
+      console.log('[Twilio Service] Call initiated:', call.sid, 'to:', to);
       
       return {
         success: true,
         callSid: call.sid,
-        status: call.status
+        status: call.status,
+        to: to,
+        from: this.phoneNumber
       };
-      
     } catch (error) {
-      console.error('[Twilio] Error making call:', error);
+      console.error('[Twilio Service] Error making call:', error.message);
       return {
         success: false,
         error: error.message
@@ -66,203 +68,361 @@ class TwilioService {
     }
   }
 
-  /**
-   * Generate TwiML for call greeting
-   * @param {string} callSid - Call SID
-   */
-  generateGreetingTwiML(callSid) {
-    const callData = this.activeCalls.get(callSid) || {};
-    const prospectName = callData.prospectName || 'there';
+  // ═══════════════════════════════════════════════════════════
+  // GENERATE OPENING GREETING (TwiML)
+  // ═══════════════════════════════════════════════════════════
+  generateGreetingTwiML(prospectName, region, scenario) {
+    const twiml = new VoiceResponse();
+    const greeting = this._getGreeting(scenario, prospectName, region);
     
-    // Generate AI greeting based on scenario
-    const greeting = this.generateAIGreeting(callData);
-    
-    const twiml = new twilio.twiml.VoiceResponse();
-    
-    // Say greeting with AI voice
+    // Say the greeting
     twiml.say({
-      voice: 'Polly.Matthew', // AWS Polly voice (we'll upgrade to ElevenLabs later)
-      language: 'en-US'
+      voice: 'Polly.Matthew',
+      language: 'en-GB'
     }, greeting);
-    
-    // Gather user response (up to 30 seconds of speech)
+
+    // Gather user response
     const gather = twiml.gather({
       input: 'speech',
-      timeout: 5,
+      action: `${this.webhookBaseUrl}/twilio/gather`,
+      method: 'POST',
       speechTimeout: 'auto',
-      action: '/twilio/gather',
-      method: 'POST'
+      speechModel: 'phone_call',
+      enhanced: true,
+      language: 'en-GB'
     });
-    
-    // If no response, prompt again
+
+    // Silence while waiting for response
+    gather.pause({ length: 1 });
+
+    // If no input, prompt again
     twiml.say({
       voice: 'Polly.Matthew',
-      language: 'en-US'
+      language: 'en-GB'
     }, "I didn't catch that. Are you still there?");
-    
+
+    twiml.redirect(`${this.webhookBaseUrl}/twilio/gather`);
+
     return twiml.toString();
   }
 
-  /**
-   * Generate AI greeting based on scenario
-   */
-  generateAIGreeting(callData) {
-    const { scenario, prospectName, region } = callData;
-    
-    // Default greeting
-    let greeting = `Hello, this is the Sales360 AI assistant. Am I speaking with ${prospectName || 'the right person'}?`;
-    
-    // Customize by scenario (we'll make this dynamic with Claude API later)
-    if (scenario === 'broker') {
-      greeting = `Good afternoon, this is Sales360 AI. I'm calling regarding your enquiry about improving trader qualification. Do you have a couple of minutes?`;
+  // ═══════════════════════════════════════════════════════════
+  // PROCESS USER RESPONSE - REAL AI CONVERSATION
+  // ═══════════════════════════════════════════════════════════
+  async processUserResponse(callSid, userSpeech, wsServer = null) {
+    try {
+      console.log('[Twilio Webhook] Gather - User said:', userSpeech);
+      
+      const callData = this.activeCalls.get(callSid);
+      if (!callData) {
+        console.error('[Twilio Service] Call data not found for:', callSid);
+        return this._generateErrorTwiML();
+      }
+
+      // Add user message to conversation history
+      callData.conversationHistory.push({
+        role: 'user',
+        content: userSpeech
+      });
+
+      // ═══════════════════════════════════════════════════════════
+      // CALL CLAUDE API FOR INTELLIGENT RESPONSE
+      // ═══════════════════════════════════════════════════════════
+      const aiResponse = await this._getClaudeResponse(callData);
+      
+      if (!aiResponse.success) {
+        console.error('[Twilio Service] Claude API error:', aiResponse.error);
+        return this._generateErrorTwiML();
+      }
+
+      // Add AI response to conversation history
+      callData.conversationHistory.push({
+        role: 'assistant',
+        content: aiResponse.fullText
+      });
+
+      // Update IntentScore
+      if (aiResponse.score !== null) {
+        callData.intentScore = aiResponse.score;
+      }
+
+      // ═══════════════════════════════════════════════════════════
+      // BROADCAST TO DASHBOARD (WebSocket)
+      // ═══════════════════════════════════════════════════════════
+      if (wsServer) {
+        wsServer.broadcast({
+          type: 'transcript',
+          role: 'user',
+          text: userSpeech,
+          timestamp: new Date().toISOString()
+        });
+
+        wsServer.broadcast({
+          type: 'transcript',
+          role: 'ai',
+          text: aiResponse.displayText,
+          timestamp: new Date().toISOString()
+        });
+
+        if (aiResponse.score !== null) {
+          wsServer.broadcast({
+            type: 'intentScore',
+            score: aiResponse.score,
+            delta: aiResponse.delta || 0
+          });
+        }
+
+        if (aiResponse.signal) {
+          wsServer.broadcast({
+            type: 'signal',
+            signal: aiResponse.signal,
+            signalType: aiResponse.signalType || 'neutral',
+            delta: aiResponse.delta || 0
+          });
+        }
+
+        if (aiResponse.score >= 75) {
+          wsServer.broadcast({
+            type: 'hotLead',
+            score: aiResponse.score,
+            prospectName: callData.prospectName
+          });
+        }
+      }
+
+      // ═══════════════════════════════════════════════════════════
+      // GENERATE TwiML RESPONSE
+      // ═══════════════════════════════════════════════════════════
+      const twiml = new VoiceResponse();
+      
+      twiml.say({
+        voice: 'Polly.Matthew',
+        language: 'en-GB'
+      }, aiResponse.displayText);
+
+      // Gather next user response
+      const gather = twiml.gather({
+        input: 'speech',
+        action: `${this.webhookBaseUrl}/twilio/gather`,
+        method: 'POST',
+        speechTimeout: 'auto',
+        speechModel: 'phone_call',
+        enhanced: true,
+        language: 'en-GB'
+      });
+
+      gather.pause({ length: 1 });
+
+      // If no input, prompt again
+      twiml.say({
+        voice: 'Polly.Matthew',
+        language: 'en-GB'
+      }, "Are you still there?");
+
+      twiml.redirect(`${this.webhookBaseUrl}/twilio/gather`);
+
+      return twiml.toString();
+
+    } catch (error) {
+      console.error('[Twilio Service] Error processing user response:', error);
+      return this._generateErrorTwiML();
     }
-    
-    return greeting;
   }
 
-  /**
-   * Process user speech response
-   * @param {string} callSid - Call SID
-   * @param {string} speechResult - User's speech transcription
-   */
-  async processUserResponse(callSid, speechResult) {
-    console.log(`[Twilio] User response (${callSid}):`, speechResult);
-    
-    const callData = this.activeCalls.get(callSid);
-    if (!callData) {
-      console.error('[Twilio] Call data not found:', callSid);
-      return this.generateErrorTwiML();
+  // ═══════════════════════════════════════════════════════════
+  // CALL CLAUDE API
+  // ═══════════════════════════════════════════════════════════
+  async _getClaudeResponse(callData) {
+    try {
+      const systemPrompt = this._getSystemPrompt(callData.scenario, callData.region, callData.prospectName);
+      
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': this.anthropicApiKey,
+          'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 1000,
+          system: systemPrompt,
+          messages: callData.conversationHistory
+        })
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('[Claude API] Error response:', errorText);
+        return {
+          success: false,
+          error: `API returned ${response.status}: ${errorText}`
+        };
+      }
+
+      const data = await response.json();
+      
+      if (!data.content || !data.content[0]) {
+        return {
+          success: false,
+          error: 'No content in API response'
+        };
+      }
+
+      const fullText = data.content[0].text || '';
+      
+      // Extract JSON score/signal from response
+      const jsonMatch = fullText.match(/\{[^{}]*"score"[^{}]*\}/);
+      let parsed = null;
+      let displayText = fullText;
+      
+      if (jsonMatch) {
+        try {
+          parsed = JSON.parse(jsonMatch[0]);
+          displayText = fullText.replace(jsonMatch[0], '').trim();
+        } catch (e) {
+          console.error('[Claude API] Failed to parse JSON:', e.message);
+        }
+      }
+
+      return {
+        success: true,
+        fullText: fullText,
+        displayText: displayText,
+        score: parsed?.score || null,
+        delta: parsed?.delta || null,
+        signal: parsed?.signal || null,
+        signalType: parsed?.signal_type || null
+      };
+
+    } catch (error) {
+      console.error('[Claude API] Fetch error:', error.message);
+      return {
+        success: false,
+        error: error.message
+      };
     }
-    
-    // Store conversation history
-    if (!callData.transcript) {
-      callData.transcript = [];
-    }
-    
-    callData.transcript.push({
-      speaker: 'user',
-      message: speechResult,
-      timestamp: new Date().toISOString()
-    });
-    
-    // TODO: Send to Claude API for AI response
-    // For now, use simple response
-    const aiResponse = "Thank you for that information. I understand you're interested in our solution. Can you tell me more about your current challenges?";
-    
-    callData.transcript.push({
-      speaker: 'ai',
-      message: aiResponse,
-      timestamp: new Date().toISOString()
-    });
-    
-    // Update call data
-    this.activeCalls.set(callSid, callData);
-    
-    // Generate TwiML response
-    const twiml = new twilio.twiml.VoiceResponse();
-    
-    twiml.say({
-      voice: 'Polly.Matthew',
-      language: 'en-US'
-    }, aiResponse);
-    
-    // Continue gathering responses
-    twiml.gather({
-      input: 'speech',
-      timeout: 5,
-      speechTimeout: 'auto',
-      action: '/twilio/gather',
-      method: 'POST'
-    });
-    
-    return twiml.toString();
   }
 
-  /**
-   * Handle call status updates
-   */
-  handleStatusUpdate(callSid, status, data) {
+  // ═══════════════════════════════════════════════════════════
+  // HANDLE STATUS UPDATES
+  // ═══════════════════════════════════════════════════════════
+  handleStatusUpdate(callSid, status, callData) {
     console.log(`[Twilio] Call ${callSid} status: ${status}`);
     
-    const callData = this.activeCalls.get(callSid);
-    if (callData) {
-      callData.status = status;
-      callData.duration = data.CallDuration;
-      this.activeCalls.set(callSid, callData);
+    if (this.activeCalls.has(callSid)) {
+      const data = this.activeCalls.get(callSid);
+      data.status = status;
+      
+      if (status === 'completed' || status === 'failed' || status === 'busy' || status === 'no-answer') {
+        data.endTime = new Date().toISOString();
+        console.log('[Twilio] Call ended:', callSid, 'Duration:', callData?.CallDuration || 'unknown');
+      }
     }
-    
-    // Broadcast to WebSocket (we'll connect this next)
-    return {
-      callSid,
-      status,
-      callData
-    };
   }
 
-  /**
-   * Handle recording available
-   */
+  // ═══════════════════════════════════════════════════════════
+  // HANDLE RECORDING
+  // ═══════════════════════════════════════════════════════════
   handleRecording(callSid, recordingUrl, recordingSid) {
-    console.log(`[Twilio] Recording available for ${callSid}:`, recordingUrl);
+    console.log('[Twilio] Recording available for call:', callSid);
+    console.log('[Twilio] Recording URL:', recordingUrl);
+    console.log('[Twilio] Recording SID:', recordingSid);
     
-    const callData = this.activeCalls.get(callSid);
-    if (callData) {
-      callData.recordingUrl = recordingUrl;
-      callData.recordingSid = recordingSid;
-      this.activeCalls.set(callSid, callData);
+    if (this.activeCalls.has(callSid)) {
+      const data = this.activeCalls.get(callSid);
+      data.recordingUrl = recordingUrl;
+      data.recordingSid = recordingSid;
     }
-    
-    return { callSid, recordingUrl };
   }
 
-  /**
-   * End call
-   */
+  // ═══════════════════════════════════════════════════════════
+  // END CALL
+  // ═══════════════════════════════════════════════════════════
   async endCall(callSid) {
     try {
       await this.client.calls(callSid).update({ status: 'completed' });
-      
-      const callData = this.activeCalls.get(callSid);
       this.activeCalls.delete(callSid);
-      
-      console.log(`[Twilio] Call ended: ${callSid}`);
-      return { success: true, callData };
-      
+      console.log('[Twilio Service] Call ended:', callSid);
+      return { success: true };
     } catch (error) {
-      console.error('[Twilio] Error ending call:', error);
+      console.error('[Twilio Service] Error ending call:', error.message);
       return { success: false, error: error.message };
     }
   }
 
-  /**
-   * Get active call data
-   */
-  getCallData(callSid) {
-    return this.activeCalls.get(callSid);
+  // ═══════════════════════════════════════════════════════════
+  // GET ACTIVE CALLS
+  // ═══════════════════════════════════════════════════════════
+  getActiveCalls() {
+    return Array.from(this.activeCalls.entries()).map(([sid, data]) => ({
+      callSid: sid,
+      ...data
+    }));
   }
 
-  /**
-   * Get all active calls
-   */
-  getAllActiveCalls() {
-    return Array.from(this.activeCalls.values());
+  // ═══════════════════════════════════════════════════════════
+  // GET CALL DETAILS
+  // ═══════════════════════════════════════════════════════════
+  getCallDetails(callSid) {
+    return this.activeCalls.get(callSid) || null;
   }
 
-  /**
-   * Generate error TwiML
-   */
-  generateErrorTwiML() {
-    const twiml = new twilio.twiml.VoiceResponse();
+  // ═══════════════════════════════════════════════════════════
+  // HELPER: GET SYSTEM PROMPT
+  // ═══════════════════════════════════════════════════════════
+  _getSystemPrompt(scenario, region, prospectName) {
+    // Using HFM broker scenario as default
+    return `You are the Sales360 AI Call Agent — the world's most intelligent sales system, built on 15+ years of front-line sales expertise.
+
+You are on a live PHONE CALL with ${prospectName}, a business leader in ${region}. They enquired about reducing trader churn and improving trader qualification.
+
+METHODOLOGY: Buyer Persuasion Loop™ — trained on Hormozi, Suby, Cardone, Belfort.
+STYLE: Professional, warm, direct. This is a PHONE CALL — be concise. Max 2-3 sentences per turn. Natural speech only.
+GOAL: Uncover their pain, build urgency, earn a pilot booking.
+THEIR PAIN: High trader churn. Poor qualification process means losing good traders to competitors.
+
+PHONE CALL RULES:
+- Speak naturally (contractions, conversational tone)
+- Keep responses SHORT (2-3 sentences max)
+- One question at a time
+- Listen more than you talk
+- React naturally to what they say
+
+After EVERY response, on a NEW LINE append exactly this JSON (no markdown, no extra text):
+{"score":<integer>,"delta":<integer>,"signal":"<short label>","signal_type":"<pain|intent|buy|neutral>"}
+
+Score tracking: Increase for admitting pain (+8-12), asking price/ROI (+12-18), urgency/timeline (+15-20), integration questions (+10), team buy-in "we" (+6), follow-up questions (+4-8). Decrease for dismissive short replies (-2 to 0). Max change per turn: 20. Never exceed 100.`;
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // HELPER: GET GREETING
+  // ═══════════════════════════════════════════════════════════
+  _getGreeting(scenario, prospectName, region) {
+    const firstName = prospectName.split(' ')[0];
+    
+    return `Good afternoon ${firstName}, this is Sales360 AI. I'm calling following your enquiry about reducing trader churn and improving qualification. Do you have a couple of minutes?`;
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // HELPER: GET STARTING SCORE
+  // ═══════════════════════════════════════════════════════════
+  _getStartingScore(scenario) {
+    return 28; // Default starting score for broker demos
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // HELPER: GENERATE ERROR TwiML
+  // ═══════════════════════════════════════════════════════════
+  _generateErrorTwiML() {
+    const twiml = new VoiceResponse();
     twiml.say({
       voice: 'Polly.Matthew',
-      language: 'en-US'
-    }, "I'm sorry, there was an error processing your call. Please try again later. Goodbye.");
+      language: 'en-GB'
+    }, "I apologize, but I'm experiencing technical difficulties. Please try again later or contact us directly.");
     twiml.hangup();
     return twiml.toString();
   }
 }
 
-// Singleton instance
-const twilioService = new TwilioService();
-
-module.exports = twilioService;
+module.exports = TwilioService;
