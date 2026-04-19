@@ -21,7 +21,6 @@ class TwilioService {
     this.activeCalls = new Map();
     
     console.log('[Twilio Service] Initialized with number:', this.phoneNumber);
-    console.log('[Twilio Service] Anthropic API Key loaded:', this.anthropicApiKey ? 'YES (length: ' + this.anthropicApiKey.length + ')' : 'NO - MISSING!');
   }
 
   // ═══════════════════════════════════════════════════════════
