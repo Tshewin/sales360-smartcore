@@ -1,231 +1,204 @@
-// Sales360 WebSocket Server
-// Standalone Node.js service for real-time Demo <-> Dashboard sync
-// Deploy separately from Python FastAPI SmartCore
+/**
+ * Sales360 SmartCore - WebSocket + Twilio Server
+ * Handles real-time Dashboard sync + Phone calls
+ */
 
-const WebSocket = require('ws');
+const express = require('express');
 const http = require('http');
+const WebSocket = require('ws');
+const cors = require('cors');
 
-// Environment variables
-const PORT = process.env.PORT || 8080;
-const WS_API_KEY = process.env.WS_API_KEY || 'sales360-demo-key-2026';
-
-console.log('╔════════════════════════════════════════════╗');
-console.log('║   Sales360 WebSocket Server v1.0          ║');
-console.log('╚════════════════════════════════════════════╝');
-console.log(`Starting on port ${PORT}...`);
-
-// Create HTTP server for health checks
-const server = http.createServer((req, res) => {
-  if (req.url === '/health') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ 
-      status: 'healthy', 
-      service: 'websocket-server',
-      connections: wss.clients.size,
-      uptime: process.uptime(),
-      timestamp: new Date().toISOString()
-    }));
-  } else if (req.url === '/') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      service: 'Sales360 WebSocket Server',
-      version: '1.0.0',
-      status: 'running',
-      endpoints: {
-        health: '/health',
-        websocket: 'ws://' + req.headers.host
-      }
-    }));
-  } else {
-    res.writeHead(404);
-    res.end('Not Found');
-  }
-});
-
-// Create WebSocket server
+const app = express();
+const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-// Client tracking
+// Middleware
+app.use(cors());
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// WebSocket API key (for Dashboard authentication)
+const WS_API_KEY = process.env.WS_API_KEY || '348bfe2c06cfb611c6240a83b8b850f4683908d2eb05d450b01b5a760c3c3dee';
+
+// Store connected clients
 const clients = new Map();
 
-// Connection handler
-wss.on('connection', (ws, req) => {
-  const clientId = generateClientId();
-  const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-  
-  console.log(`[${new Date().toISOString()}] New connection - ID: ${clientId}, IP: ${clientIp}`);
+// ═══════════════════════════════════════════════════
+// WEBSOCKET SERVER (existing Demo sync)
+// ═══════════════════════════════════════════════════
 
-  // Authentication state
+wss.on('connection', (ws) => {
+  let clientId = null;
+  let clientType = null;
   let authenticated = false;
-  let authTimeout = setTimeout(() => {
-    if (!authenticated) {
-      console.log(`[${new Date().toISOString()}] Auth timeout - ${clientId}`);
-      ws.close(4001, 'Authentication timeout');
-    }
-  }, 10000); // 10 second auth window
 
-  // Message handler
   ws.on('message', (message) => {
     try {
       const data = JSON.parse(message);
 
       // Handle authentication
-      if (!authenticated) {
-        if (data.type === 'auth' && data.apiKey === WS_API_KEY) {
-          authenticated = true;
-          clearTimeout(authTimeout);
-          
-          // Store client metadata
-          clients.set(clientId, {
-            ws,
-            clientType: data.clientType || 'unknown',
-            connectedAt: new Date().toISOString(),
-            lastActivity: new Date().toISOString()
-          });
-
-          // Send auth success
-          ws.send(JSON.stringify({
-            type: 'authSuccess',
-            clientId,
-            message: 'WebSocket authenticated successfully',
-            timestamp: new Date().toISOString()
-          }));
-
-          console.log(`[${new Date().toISOString()}] ✓ Auth success - ${clientId} (${data.clientType})`);
-          
-          // Broadcast connection event
-          broadcast({
-            type: 'clientConnected',
-            clientId,
-            clientType: data.clientType,
-            timestamp: new Date().toISOString()
-          }, clientId);
-
-        } else {
-          ws.close(4003, 'Invalid API key');
-          console.log(`[${new Date().toISOString()}] ✗ Auth failed - ${clientId}`);
+      if (data.type === 'auth') {
+        if (data.apiKey !== WS_API_KEY) {
+          ws.send(JSON.stringify({ type: 'authFailed', reason: 'Invalid API key' }));
+          ws.close();
+          return;
         }
+
+        authenticated = true;
+        clientId = `client_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        clientType = data.clientType || 'unknown';
+
+        clients.set(clientId, { ws, type: clientType, connectedAt: new Date() });
+
+        ws.send(JSON.stringify({ type: 'authSuccess', clientId, clientType }));
+        console.log(`✓ Auth success - ${clientType} (${clientId})`);
+
+        // Broadcast client connection
+        broadcast({
+          type: 'clientConnected',
+          clientId,
+          clientType,
+          timestamp: new Date().toISOString()
+        }, clientId);
+
         return;
       }
 
-      // Update last activity
-      const client = clients.get(clientId);
-      if (client) {
-        client.lastActivity = new Date().toISOString();
+      // Reject unauthenticated messages
+      if (!authenticated) {
+        ws.send(JSON.stringify({ type: 'error', message: 'Not authenticated' }));
+        return;
       }
 
-      // Handle events from authenticated clients
-      handleEvent(data, clientId);
+      // Handle events from Demo
+      if (data.type === 'event') {
+        console.log(`Event: ${data.event} from ${clientId}`);
+        
+        // Broadcast to all clients (especially Dashboard)
+        broadcast({
+          type: 'event',
+          event: data.event,
+          payload: data.payload,
+          timestamp: new Date().toISOString()
+        }, clientId);
+      }
 
     } catch (error) {
-      console.error(`[${new Date().toISOString()}] Message parse error:`, error.message);
-      ws.send(JSON.stringify({
-        type: 'error',
-        message: 'Invalid message format',
-        timestamp: new Date().toISOString()
-      }));
+      console.error('WebSocket error:', error);
+      ws.send(JSON.stringify({ type: 'error', message: 'Invalid message format' }));
     }
   });
 
-  // Close handler
-  ws.on('close', (code, reason) => {
-    clearTimeout(authTimeout);
-    const client = clients.get(clientId);
-    if (client) {
-      console.log(`[${new Date().toISOString()}] Disconnect - ${clientId} (${client.clientType}) - Code: ${code}`);
+  ws.on('close', () => {
+    if (clientId) {
+      console.log(`Disconnect - ${clientType} (${clientId}) - Code: 1006`);
       clients.delete(clientId);
       
       // Broadcast disconnection
       broadcast({
         type: 'clientDisconnected',
         clientId,
+        clientType,
         timestamp: new Date().toISOString()
-      }, clientId);
+      });
     }
   });
 
-  // Error handler
   ws.on('error', (error) => {
-    console.error(`[${new Date().toISOString()}] WebSocket error - ${clientId}:`, error.message);
+    console.error('WebSocket error:', error);
   });
 });
 
-// Event handler
-function handleEvent(data, senderId) {
-  const { type, event, payload } = data;
-
-  if (type !== 'event') return;
-
-  // Validate event types
-  const validEvents = ['intentScore', 'hotLead', 'callState', 'transcript'];
-  if (!validEvents.includes(event)) {
-    console.warn(`[${new Date().toISOString()}] Unknown event: ${event}`);
-    return;
-  }
-
-  console.log(`[${new Date().toISOString()}] Event: ${event} from ${senderId}`);
-
-  // Broadcast event to all clients except sender
-  broadcast({
-    type: 'event',
-    event,
-    payload,
-    timestamp: new Date().toISOString(),
-    source: senderId
-  }, senderId);
-}
-
-// Broadcast function
+// Broadcast to all connected clients except sender
 function broadcast(message, excludeClientId = null) {
   const messageStr = JSON.stringify(message);
-  let broadcastCount = 0;
+  let sentCount = 0;
 
-  clients.forEach((client, clientId) => {
-    if (clientId !== excludeClientId && client.ws.readyState === WebSocket.OPEN) {
+  clients.forEach((client, id) => {
+    if (id !== excludeClientId && client.ws.readyState === WebSocket.OPEN) {
       client.ws.send(messageStr);
-      broadcastCount++;
+      sentCount++;
     }
   });
 
-  if (broadcastCount > 0) {
-    console.log(`[${new Date().toISOString()}] Broadcast: ${message.event || message.type} → ${broadcastCount} clients`);
+  if (sentCount > 0) {
+    console.log(`Broadcast: ${message.type || message.event} → ${sentCount} clients`);
   }
 }
 
-// Utility: Generate unique client ID
-function generateClientId() {
-  return `client_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-}
+// Heartbeat to keep connections alive
+setInterval(() => {
+  const activeCount = clients.size;
+  if (activeCount > 0) {
+    console.log(`Heartbeat: ${activeCount} active connections`);
+  }
+}, 30000);
 
-// Start server
+// ═══════════════════════════════════════════════════
+// TWILIO CALL ROUTES (NEW)
+// ═══════════════════════════════════════════════════
+
+const callRoutes = require('./call-routes');
+
+// Mount call routes
+app.use('/api/call', callRoutes);
+app.use('/twilio', callRoutes); // Twilio webhooks
+
+// ═══════════════════════════════════════════════════
+// HEALTH CHECK
+// ═══════════════════════════════════════════════════
+
+app.get('/', (req, res) => {
+  res.json({
+    service: 'Sales360 SmartCore',
+    status: 'running',
+    websocket: 'active',
+    twilio: 'active',
+    clients: clients.size,
+    uptime: process.uptime()
+  });
+});
+
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    connections: {
+      websocket: clients.size,
+      active: Array.from(clients.values()).map(c => c.type)
+    }
+  });
+});
+
+// ═══════════════════════════════════════════════════
+// START SERVER
+// ═══════════════════════════════════════════════════
+
+const PORT = process.env.PORT || 3000;
+
 server.listen(PORT, () => {
-  console.log('');
-  console.log('✓ Server started successfully');
-  console.log(`✓ HTTP Health: http://localhost:${PORT}/health`);
-  console.log(`✓ WebSocket:   ws://localhost:${PORT}`);
-  console.log(`✓ Auth:        API key required`);
-  console.log('✓ Waiting for connections...');
-  console.log('');
+  console.log(`
+╔════════════════════════════════════════════════════╗
+║                                                    ║
+║           Sales360 SmartCore Server                ║
+║                                                    ║
+║  WebSocket: wss://successful-strength...railway.app║
+║  HTTP: Port ${PORT}                                  ║
+║  Twilio: Active                                    ║
+║                                                    ║
+╚════════════════════════════════════════════════════╝
+  `);
+  
+  console.log('[SmartCore] Server started successfully');
+  console.log('[SmartCore] WebSocket endpoint ready');
+  console.log('[SmartCore] Twilio integration ready');
 });
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
-  console.log('[WebSocket] SIGTERM received, closing server...');
-  wss.close(() => {
-    server.close(() => {
-      console.log('[WebSocket] Server closed gracefully');
-      process.exit(0);
-    });
+  console.log('[SmartCore] SIGTERM received, shutting down gracefully');
+  server.close(() => {
+    console.log('[SmartCore] Server closed');
+    process.exit(0);
   });
 });
-
-// Heartbeat to keep Railway from sleeping (optional)
-setInterval(() => {
-  const activeConnections = Array.from(clients.values()).filter(
-    c => c.ws.readyState === WebSocket.OPEN
-  ).length;
-  
-  if (activeConnections > 0) {
-    console.log(`[${new Date().toISOString()}] Heartbeat: ${activeConnections} active connections`);
-  }
-}, 60000); // Every 60 seconds
