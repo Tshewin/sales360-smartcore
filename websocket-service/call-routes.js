@@ -109,13 +109,13 @@ function setupCallRoutes(wsServer, twilioService, elevenLabsService) {
   // ═══════════════════════════════════════════════════════════
 
   // Voice webhook - Initial call connection
-  router.post('/twilio/voice', (req, res) => {
+  router.post('/twilio/voice', async (req, res) => {
     try {
       const { prospectName, region, scenario, CallSid } = req.query;
       
       console.log('[Twilio Webhook] Voice - Call connected:', CallSid);
       
-      const twiml = twilioService.generateGreetingTwiML(
+      const twiml = await twilioService.generateGreetingTwiML(
         prospectName || 'there',
         region || 'UK',
         scenario || 'broker'

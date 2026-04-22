@@ -1,7 +1,7 @@
 // ═══════════════════════════════════════════════════════════
 // SALES360 AUDIO STORAGE SERVICE
 // Uploads temporary audio files for Twilio <Play>
-// Supports: Cloudflare R2, AWS S3
+// Supports: Cloudflare R2, AWS S3, Data URI fallback
 // ═══════════════════════════════════════════════════════════
 
 const crypto = require('crypto');
@@ -9,14 +9,14 @@ const crypto = require('crypto');
 class StorageService {
   constructor() {
     // Check which storage provider is configured
-    this.provider = process.env.AUDIO_STORAGE_PROVIDER || 'r2'; // 'r2' or 's3'
+    this.provider = process.env.AUDIO_STORAGE_PROVIDER || 'datauri'; // 'r2', 's3', or 'datauri'
     
     // Cloudflare R2 credentials
     this.r2AccountId = process.env.R2_ACCOUNT_ID;
     this.r2AccessKey = process.env.R2_ACCESS_KEY_ID;
     this.r2SecretKey = process.env.R2_SECRET_ACCESS_KEY;
     this.r2BucketName = process.env.R2_BUCKET_NAME || 'sales360-audio';
-    this.r2PublicUrl = process.env.R2_PUBLIC_URL; // e.g., https://audio.sales360-ai.com
+    this.r2PublicUrl = process.env.R2_PUBLIC_URL; // e.g., https://pub-xxxxx.r2.dev
     
     // AWS S3 credentials (fallback)
     this.s3Region = process.env.AWS_REGION || 'us-east-1';
@@ -26,23 +26,25 @@ class StorageService {
     
     this.enabled = false;
     
-    if (this.provider === 'r2' && this.r2AccountId && this.r2AccessKey) {
+    if (this.provider === 'r2' && this.r2AccountId && this.r2AccessKey && this.r2SecretKey) {
       console.log('[Storage] ✅ Cloudflare R2 configured');
       console.log('[Storage]    Bucket:', this.r2BucketName);
+      console.log('[Storage]    Public URL:', this.r2PublicUrl || 'Not set (will use R2 endpoint)');
       this.enabled = true;
     } else if (this.provider === 's3' && this.s3AccessKey) {
       console.log('[Storage] ✅ AWS S3 configured');
       console.log('[Storage]    Bucket:', this.s3BucketName);
       this.enabled = true;
     } else {
-      console.warn('[Storage] ⚠️  No storage provider configured');
+      console.warn('[Storage] ⚠️  No storage provider configured - using data URI fallback');
+      this.provider = 'datauri';
     }
   }
 
   // Upload audio buffer and return public URL
   async uploadAudio(audioBuffer, callSid) {
-    if (!this.enabled) {
-      console.log('[Storage] Disabled - returning data URI fallback');
+    if (this.provider === 'datauri' || !this.enabled) {
+      console.log('[Storage] Using data URI fallback');
       return this._createDataUri(audioBuffer);
     }
 
@@ -70,27 +72,90 @@ class StorageService {
     }
   }
 
-  // Upload to Cloudflare R2
+  // Upload to Cloudflare R2 (using S3-compatible API)
   async _uploadToR2(audioBuffer, filename) {
     const endpoint = `https://${this.r2AccountId}.r2.cloudflarestorage.com`;
-    const url = `${endpoint}/${this.r2BucketName}/${filename}`;
+    const bucketUrl = `${endpoint}/${this.r2BucketName}`;
+    const objectUrl = `${bucketUrl}/${filename}`;
     
-    const response = await fetch(url, {
+    // Generate AWS Signature V4 for R2
+    const date = new Date();
+    const dateStamp = date.toISOString().slice(0, 10).replace(/-/g, '');
+    const amzDate = date.toISOString().replace(/[:-]|\.\d{3}/g, '');
+    
+    const method = 'PUT';
+    const service = 's3';
+    const region = 'auto';
+    
+    // Create canonical request
+    const canonicalUri = `/${this.r2BucketName}/${filename}`;
+    const canonicalQueryString = '';
+    const canonicalHeaders = [
+      `content-type:audio/mpeg`,
+      `host:${this.r2AccountId}.r2.cloudflarestorage.com`,
+      `x-amz-content-sha256:UNSIGNED-PAYLOAD`,
+      `x-amz-date:${amzDate}`
+    ].join('\n') + '\n';
+    const signedHeaders = 'content-type;host;x-amz-content-sha256;x-amz-date';
+    const payloadHash = 'UNSIGNED-PAYLOAD';
+    
+    const canonicalRequest = [
+      method,
+      canonicalUri,
+      canonicalQueryString,
+      canonicalHeaders,
+      signedHeaders,
+      payloadHash
+    ].join('\n');
+    
+    // Create string to sign
+    const algorithm = 'AWS4-HMAC-SHA256';
+    const credentialScope = `${dateStamp}/${region}/${service}/aws4_request`;
+    const canonicalRequestHash = crypto
+      .createHash('sha256')
+      .update(canonicalRequest)
+      .digest('hex');
+    
+    const stringToSign = [
+      algorithm,
+      amzDate,
+      credentialScope,
+      canonicalRequestHash
+    ].join('\n');
+    
+    // Calculate signature
+    const kDate = crypto.createHmac('sha256', `AWS4${this.r2SecretKey}`).update(dateStamp).digest();
+    const kRegion = crypto.createHmac('sha256', kDate).update(region).digest();
+    const kService = crypto.createHmac('sha256', kRegion).update(service).digest();
+    const kSigning = crypto.createHmac('sha256', kService).update('aws4_request').digest();
+    const signature = crypto.createHmac('sha256', kSigning).update(stringToSign).digest('hex');
+    
+    // Create authorization header
+    const authorization = `${algorithm} Credential=${this.r2AccessKey}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
+    
+    // Upload to R2
+    const response = await fetch(objectUrl, {
       method: 'PUT',
       headers: {
         'Content-Type': 'audio/mpeg',
-        'Content-Length': audioBuffer.byteLength.toString()
+        'Host': `${this.r2AccountId}.r2.cloudflarestorage.com`,
+        'x-amz-content-sha256': 'UNSIGNED-PAYLOAD',
+        'x-amz-date': amzDate,
+        'Authorization': authorization
       },
       body: audioBuffer
     });
 
     if (!response.ok) {
+      const errorText = await response.text();
+      console.error('[Storage] R2 upload error:', response.status, errorText);
       throw new Error(`R2 upload failed: ${response.status}`);
     }
 
+    // Return public URL
     const publicUrl = this.r2PublicUrl 
       ? `${this.r2PublicUrl}/${filename}`
-      : `${endpoint}/${this.r2BucketName}/${filename}`;
+      : `${bucketUrl}/${filename}`;
     
     console.log('[Storage] ✅ Uploaded to R2:', publicUrl);
     
@@ -115,12 +180,20 @@ class StorageService {
   // Create data URI as fallback (embeds audio in TwiML)
   _createDataUri(audioBuffer) {
     const base64 = audioBuffer.toString('base64');
-    return `data:audio/mpeg;base64,${base64}`;
+    const dataUri = `data:audio/mpeg;base64,${base64}`;
+    
+    // Warn if data URI is very large (>1MB can cause issues with Twilio)
+    const sizeKB = Math.round(audioBuffer.byteLength / 1024);
+    if (sizeKB > 1024) {
+      console.warn(`[Storage] ⚠️  Data URI is large (${sizeKB}KB) - may cause Twilio errors. Consider using R2/S3.`);
+    }
+    
+    return dataUri;
   }
 
   // Check if service is ready
   isReady() {
-    return this.enabled;
+    return this.enabled && this.provider !== 'datauri';
   }
 
   // Clean up old files (optional - can be called periodically)
