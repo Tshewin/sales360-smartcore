@@ -356,6 +356,55 @@ Start: 22. Increase for: asks about account types (+8), mentions capital (+12), 
     }
   }
 
+  // Alias for call-routes compatibility
+  handleStatusUpdate(callSid, status, body) {
+    return this.handleStatus(callSid, status);
+  }
+
+  // Process user response (wrapper for handleGather)
+  async processUserResponse(callSid, speechResult, wsServer) {
+    return await this.handleGather(callSid, speechResult);
+  }
+
+  // Get active calls
+  getActiveCalls() {
+    const calls = [];
+    this.activeCalls.forEach((data, sid) => {
+      calls.push({
+        sid,
+        prospectName: data.prospectName,
+        region: data.region,
+        scenario: data.scenario,
+        intentScore: data.intentScore,
+        startTime: data.startTime,
+        endTime: data.endTime
+      });
+    });
+    return calls;
+  }
+
+  // Get call details
+  getCallDetails(callSid) {
+    return this.activeCalls.get(callSid);
+  }
+
+  // End call
+  async endCall(callSid) {
+    try {
+      await this.client.calls(callSid).update({ status: 'completed' });
+      return {
+        success: true,
+        message: `Call ${callSid} ended`
+      };
+    } catch (error) {
+      console.error('[Twilio] Error ending call:', error);
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+  }
+
   handleRecording(callSid, recordingUrl, recordingSid) {
     console.log(`[Twilio] Recording available for call: ${callSid}`);
     console.log(`[Twilio] Recording URL: ${recordingUrl}`);
