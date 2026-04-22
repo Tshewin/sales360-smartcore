@@ -1,191 +1,210 @@
-/**
- * Sales360 - Twilio Call Routes
- * API endpoints for call management and Twilio webhooks
- */
+// ═══════════════════════════════════════════════════════════
+// SALES360 CALL API ROUTES - WITH REAL AI CONVERSATION
+// ═══════════════════════════════════════════════════════════
 
 const express = require('express');
-const router = express.Router();
-const twilioService = require('./twilio-service');
+const TwilioService = require('./twilio-service');
 
-// Base URL for webhooks (set from environment or detect from request)
-const getWebhookBaseUrl = (req) => {
-  return process.env.WEBHOOK_BASE_URL || `${req.protocol}://${req.get('host')}`;
-};
+function setupCallRoutes(wsServer) {
+  const router = express.Router();
+  const twilioService = new TwilioService();
 
-/**
- * POST /api/call/make
- * Initiate outbound call from Dashboard
- * 
- * Body: {
- *   to: "+1234567890",
- *   prospectName: "John Doe",
- *   region: "US",
- *   scenario: "broker"
- * }
- */
-router.post('/make', async (req, res) => {
-  try {
-    const { to, prospectName, region, scenario } = req.body;
-    
-    if (!to) {
-      return res.status(400).json({ error: 'Phone number (to) is required' });
+  // ═══════════════════════════════════════════════════════════
+  // API ROUTES
+  // ═══════════════════════════════════════════════════════════
+
+  // Make outbound call
+  router.post('/api/call/make', async (req, res) => {
+    try {
+      const { to, prospectName, region, scenario } = req.body;
+
+      if (!to || !prospectName) {
+        return res.status(400).json({
+          success: false,
+          error: 'Missing required fields: to, prospectName'
+        });
+      }
+
+      const result = await twilioService.makeCall({
+        to,
+        prospectName: prospectName || 'there',
+        region: region || 'UK',
+        scenario: scenario || 'broker'
+      });
+
+      res.json(result);
+    } catch (error) {
+      console.error('[Call API] Error in /call/make:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
     }
-    
-    const webhookBaseUrl = getWebhookBaseUrl(req);
-    
-    const result = await twilioService.makeCall(to, {
-      prospectName,
-      region,
-      scenario
-    }, webhookBaseUrl);
-    
-    res.json(result);
-    
-  } catch (error) {
-    console.error('[Call API] Error making call:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
+  });
 
-/**
- * POST /api/call/end/:callSid
- * End active call
- */
-router.post('/end/:callSid', async (req, res) => {
-  try {
-    const { callSid } = req.params;
-    const result = await twilioService.endCall(callSid);
-    res.json(result);
-  } catch (error) {
-    console.error('[Call API] Error ending call:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-/**
- * GET /api/call/active
- * Get all active calls
- */
-router.get('/active', (req, res) => {
-  try {
-    const activeCalls = twilioService.getAllActiveCalls();
-    res.json({ calls: activeCalls });
-  } catch (error) {
-    console.error('[Call API] Error fetching active calls:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-/**
- * GET /api/call/:callSid
- * Get specific call data
- */
-router.get('/:callSid', (req, res) => {
-  try {
-    const { callSid } = req.params;
-    const callData = twilioService.getCallData(callSid);
-    
-    if (!callData) {
-      return res.status(404).json({ error: 'Call not found' });
+  // End call
+  router.post('/api/call/end/:callSid', async (req, res) => {
+    try {
+      const { callSid } = req.params;
+      const result = await twilioService.endCall(callSid);
+      res.json(result);
+    } catch (error) {
+      console.error('[Call API] Error in /call/end:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
     }
-    
-    res.json(callData);
-  } catch (error) {
-    console.error('[Call API] Error fetching call:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
+  });
 
-// ═══════════════════════════════════════════════════
-// TWILIO WEBHOOKS (called by Twilio, not by Dashboard)
-// ═══════════════════════════════════════════════════
+  // Get active calls
+  router.get('/api/call/active', (req, res) => {
+    try {
+      const calls = twilioService.getActiveCalls();
+      res.json({ success: true, calls });
+    } catch (error) {
+      console.error('[Call API] Error in /call/active:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  });
 
-/**
- * POST /twilio/voice
- * Called when call connects - return TwiML greeting
- */
-router.post('/voice', (req, res) => {
-  try {
-    const callSid = req.body.CallSid;
-    console.log('[Twilio Webhook] Voice - Call connected:', callSid);
-    
-    const twiml = twilioService.generateGreetingTwiML(callSid);
-    
-    res.type('text/xml');
-    res.send(twiml);
-    
-  } catch (error) {
-    console.error('[Twilio Webhook] Error in voice:', error);
-    res.type('text/xml');
-    res.send(twilioService.generateErrorTwiML());
-  }
-});
+  // Get call details
+  router.get('/api/call/:callSid', (req, res) => {
+    try {
+      const { callSid } = req.params;
+      const call = twilioService.getCallDetails(callSid);
+      
+      if (!call) {
+        return res.status(404).json({
+          success: false,
+          error: 'Call not found'
+        });
+      }
 
-/**
- * POST /twilio/gather
- * Called when user speaks - process response and continue conversation
- */
-router.post('/gather', async (req, res) => {
-  try {
-    const callSid = req.body.CallSid;
-    const speechResult = req.body.SpeechResult || '';
-    
-    console.log('[Twilio Webhook] Gather - User said:', speechResult);
-    
-    const twiml = await twilioService.processUserResponse(callSid, speechResult);
-    
-    res.type('text/xml');
-    res.send(twiml);
-    
-  } catch (error) {
-    console.error('[Twilio Webhook] Error in gather:', error);
-    res.type('text/xml');
-    res.send(twilioService.generateErrorTwiML());
-  }
-});
+      res.json({ success: true, call });
+    } catch (error) {
+      console.error('[Call API] Error in /call/:callSid:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  });
 
-/**
- * POST /twilio/status
- * Called on call status changes (initiated, ringing, answered, completed)
- */
-router.post('/status', (req, res) => {
-  try {
-    const callSid = req.body.CallSid;
-    const status = req.body.CallStatus;
-    
-    const result = twilioService.handleStatusUpdate(callSid, status, req.body);
-    
-    // TODO: Broadcast to WebSocket Dashboard
-    console.log('[Twilio Webhook] Status update:', result);
-    
-    res.sendStatus(200);
-    
-  } catch (error) {
-    console.error('[Twilio Webhook] Error in status:', error);
-    res.sendStatus(500);
-  }
-});
+  // ═══════════════════════════════════════════════════════════
+  // TWILIO WEBHOOKS
+  // ═══════════════════════════════════════════════════════════
 
-/**
- * POST /twilio/recording
- * Called when call recording is available
- */
-router.post('/recording', (req, res) => {
-  try {
-    const callSid = req.body.CallSid;
-    const recordingUrl = req.body.RecordingUrl;
-    const recordingSid = req.body.RecordingSid;
-    
-    twilioService.handleRecording(callSid, recordingUrl, recordingSid);
-    
-    console.log('[Twilio Webhook] Recording available:', recordingUrl);
-    
-    res.sendStatus(200);
-    
-  } catch (error) {
-    console.error('[Twilio Webhook] Error in recording:', error);
-    res.sendStatus(500);
-  }
-});
+  // Voice webhook - Initial call connection
+  router.post('/twilio/voice', (req, res) => {
+    try {
+      const { prospectName, region, scenario, CallSid } = req.query;
+      
+      console.log('[Twilio Webhook] Voice - Call connected:', CallSid);
+      
+      const twiml = twilioService.generateGreetingTwiML(
+        prospectName || 'there',
+        region || 'UK',
+        scenario || 'broker'
+      );
+      
+      res.type('text/xml');
+      res.send(twiml);
+    } catch (error) {
+      console.error('[Twilio Webhook] Error in /twilio/voice:', error);
+      res.status(500).send('Error processing voice webhook');
+    }
+  });
 
-module.exports = router;
+  // Gather webhook - Process user speech and generate AI response
+  router.post('/twilio/gather', async (req, res) => {
+    try {
+      const { SpeechResult, CallSid } = req.body;
+      
+      if (!SpeechResult || SpeechResult.trim() === '') {
+        console.log('[Twilio Webhook] Gather - No speech detected');
+        
+        // Prompt user to speak
+        const VoiceResponse = require('twilio').twiml.VoiceResponse;
+        const twiml = new VoiceResponse();
+        
+        twiml.say({
+          voice: 'Polly.Matthew',
+          language: 'en-GB'
+        }, "I didn't catch that. Could you please repeat?");
+        
+        const gather = twiml.gather({
+          input: 'speech',
+          action: `${process.env.WEBHOOK_BASE_URL}/twilio/gather`,
+          method: 'POST',
+          speechTimeout: 'auto',
+          speechModel: 'phone_call',
+          enhanced: true,
+          language: 'en-GB'
+        });
+        
+        gather.pause({ length: 1 });
+        
+        res.type('text/xml');
+        res.send(twiml.toString());
+        return;
+      }
+
+      console.log('[Twilio Webhook] Gather - Processing speech from call:', CallSid);
+      
+      // Generate AI response with real Claude conversation
+      const twiml = await twilioService.processUserResponse(CallSid, SpeechResult, wsServer);
+      
+      res.type('text/xml');
+      res.send(twiml);
+    } catch (error) {
+      console.error('[Twilio Webhook] Error in /twilio/gather:', error);
+      res.status(500).send('Error processing gather webhook');
+    }
+  });
+
+  // Status webhook - Track call status
+  router.post('/twilio/status', (req, res) => {
+    try {
+      const { CallSid, CallStatus } = req.body;
+      
+      twilioService.handleStatusUpdate(CallSid, CallStatus, req.body);
+      
+      // Broadcast call status to Dashboard
+      if (wsServer) {
+        wsServer.broadcast({
+          type: 'callState',
+          state: CallStatus,
+          callSid: CallSid,
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      res.sendStatus(200);
+    } catch (error) {
+      console.error('[Twilio Webhook] Error in /twilio/status:', error);
+      res.status(500).send('Error processing status webhook');
+    }
+  });
+
+  // Recording webhook - Handle call recordings
+  router.post('/twilio/recording', (req, res) => {
+    try {
+      const { CallSid, RecordingUrl, RecordingSid } = req.body;
+      
+      twilioService.handleRecording(CallSid, RecordingUrl, RecordingSid);
+      
+      res.sendStatus(200);
+    } catch (error) {
+      console.error('[Twilio Webhook] Error in /twilio/recording:', error);
+      res.status(500).send('Error processing recording webhook');
+    }
+  });
+
+  return router;
+}
+
+module.exports = setupCallRoutes;

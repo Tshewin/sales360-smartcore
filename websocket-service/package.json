@@ -1,7 +1,7 @@
 {
   "name": "sales360-smartcore",
-  "version": "1.0.0",
-  "description": "Sales360 SmartCore - WebSocket + Twilio Server",
+  "version": "2.1.0-elevenlabs",
+  "description": "Sales360 SmartCore - WebSocket + Twilio + ElevenLabs Voice Cloning",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

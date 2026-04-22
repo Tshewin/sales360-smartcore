@@ -1,6 +1,6 @@
 /**
  * Sales360 SmartCore Server
- * WebSocket + Twilio Integration
+ * WebSocket + Twilio Integration + ElevenLabs Voice Cloning
  */
 
 const express = require('express');
@@ -90,12 +90,33 @@ const wsServer = {
   clients: clients
 };
 
+// ══════════════════════════════════════════════════════════
+// PHASE 2A: ELEVENLABS VOICE CLONING INTEGRATION
+// ══════════════════════════════════════════════════════════
+
+// Initialize ElevenLabs service FIRST
+const ElevenLabsService = require('./elevenlabs-dynamic-service');
+const elevenLabsService = new ElevenLabsService();
+
+console.log('[ElevenLabs] ✅ Service initialized');
+console.log(`[ElevenLabs] Default voice (Chuks): ${process.env.ELEVENLABS_DEFAULT_VOICE_ID || 'lJd1hi6nFFWkrcDH9i3a'}`);
+console.log(`[ElevenLabs] Audio storage: ${process.env.AUDIO_STORAGE_PROVIDER || 'datauri'}`);
+
+// Initialize Twilio service with ElevenLabs
+const TwilioService = require('./twilio-service');
+const twilioService = new TwilioService(elevenLabsService);
+
+console.log('[Twilio Service] Using ElevenLabs for voice synthesis');
+
+// Load call routes with updated services
 const setupCallRoutes = require('./call-routes');
-const callRoutes = setupCallRoutes(wsServer);
+const callRoutes = setupCallRoutes(wsServer, twilioService, elevenLabsService);
 
 app.use(callRoutes);
 
-console.log('[Setup] Call routes mounted');
+console.log('[Setup] Call routes mounted with ElevenLabs voice');
+
+// ══════════════════════════════════════════════════════════
 
 app.get('/health', (req, res) => {
   res.json({
@@ -108,6 +129,11 @@ app.get('/health', (req, res) => {
     twilio: {
       active: true,
       phoneNumber: process.env.TWILIO_PHONE_NUMBER || 'not configured'
+    },
+    elevenlabs: {
+      active: !!process.env.ELEVENLABS_API_KEY,
+      voiceId: process.env.ELEVENLABS_DEFAULT_VOICE_ID || 'lJd1hi6nFFWkrcDH9i3a',
+      storageProvider: process.env.AUDIO_STORAGE_PROVIDER || 'datauri'
     }
   });
 });
@@ -115,8 +141,12 @@ app.get('/health', (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     service: 'Sales360 SmartCore',
-    version: '2.0.0',
-    features: ['WebSocket Real-time Sync', 'Twilio Phone Integration'],
+    version: '2.1.0-elevenlabs',
+    features: [
+      'WebSocket Real-time Sync', 
+      'Twilio Phone Integration',
+      'ElevenLabs Voice Cloning (Chuks)'
+    ],
     endpoints: {
       websocket: 'wss://<host>',
       health: '/health',
@@ -156,5 +186,3 @@ server.listen(PORT, () => {
     console.log('Twilio: Inactive\n');
   }
 });
- 
- 

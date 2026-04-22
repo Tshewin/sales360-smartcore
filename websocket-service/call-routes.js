@@ -1,13 +1,23 @@
 // ═══════════════════════════════════════════════════════════
-// SALES360 CALL API ROUTES - WITH REAL AI CONVERSATION
+// SALES360 CALL API ROUTES - WITH REAL AI CONVERSATION + ELEVENLABS
 // ═══════════════════════════════════════════════════════════
 
 const express = require('express');
-const TwilioService = require('./twilio-service');
 
-function setupCallRoutes(wsServer) {
+function setupCallRoutes(wsServer, twilioService, elevenLabsService) {
   const router = express.Router();
-  const twilioService = new TwilioService();
+
+  // Validate that services were passed correctly
+  if (!twilioService) {
+    console.error('[Call Routes] ERROR: twilioService not provided!');
+    throw new Error('TwilioService is required');
+  }
+
+  if (!elevenLabsService) {
+    console.log('[Call Routes] WARNING: elevenLabsService not provided, voice synthesis may fall back to AWS Polly');
+  } else {
+    console.log('[Call Routes] ✅ ElevenLabs service connected');
+  }
 
   // ═══════════════════════════════════════════════════════════
   // API ROUTES
