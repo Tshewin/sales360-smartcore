@@ -134,6 +134,14 @@ app.get('/health', (req, res) => {
       active: !!process.env.ELEVENLABS_API_KEY,
       voiceId: process.env.ELEVENLABS_DEFAULT_VOICE_ID || 'lJd1hi6nFFWkrcDH9i3a',
       storageProvider: process.env.AUDIO_STORAGE_PROVIDER || 'datauri'
+    },
+    storage: {
+      provider: process.env.AUDIO_STORAGE_PROVIDER || 'not set',
+      r2AccountId: process.env.R2_ACCOUNT_ID ? 'set' : 'NOT SET',
+      r2AccessKey: process.env.R2_ACCESS_KEY_ID ? 'set' : 'NOT SET',
+      r2SecretKey: process.env.R2_SECRET_ACCESS_KEY ? 'set' : 'NOT SET',
+      r2BucketName: process.env.R2_BUCKET_NAME || 'not set',
+      r2PublicUrl: process.env.R2_PUBLIC_URL || 'not set'
     }
   });
 });
