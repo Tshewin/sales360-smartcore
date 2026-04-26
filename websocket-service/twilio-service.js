@@ -420,9 +420,6 @@ class TwilioService {
     // DEFAULT: Balanced response (good for most situations)
     return 220; // Sweet spot: professional but not slow
   }
-      return null;
-    }
-  }
 
   // ═══════════════════════════════════════════════════════════
   // HELPER METHODS (same as before)
