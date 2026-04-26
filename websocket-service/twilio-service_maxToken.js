@@ -23,9 +23,6 @@ class TwilioService {
     this.client = twilio(this.accountSid, this.authToken);
     this.activeCalls = new Map();
     
-    // ⚡ OPTIMIZATION: Greeting cache (avoid regenerating same audio)
-    this.greetingCache = new Map();
-    
     // Use provided ElevenLabs service OR create new one
     if (elevenLabsService) {
       console.log('[Twilio Service] ✅ Using provided ElevenLabs service');
@@ -93,55 +90,37 @@ class TwilioService {
   }
 
   // ═══════════════════════════════════════════════════════════
-  // GENERATE OPENING GREETING (WITH ELEVENLABS + CACHING!)
+  // GENERATE OPENING GREETING (WITH ELEVENLABS!)
   // ═══════════════════════════════════════════════════════════
   async generateGreetingTwiML(prospectName, region, scenario) {
-    const startTime = Date.now();
     const twiml = new VoiceResponse();
     const greeting = this._getGreeting(scenario, prospectName, region);
     
-    // ⚡ OPTIMIZATION: Check cache first
-    const cacheKey = `${scenario}-${region}`;
+    console.log(`[Twilio Service] 🎤 Generating greeting with ElevenLabs...`);
     
-    console.log(`[Twilio Service] 🎤 Generating greeting...`);
-    console.log(`[Twilio Service]    Cache key: ${cacheKey}`);
+    // Try to generate with ElevenLabs
+    const audioBuffer = await this.elevenLabs.generateAudio(greeting, region, 'Male');
     
-    let audioUrl = this.greetingCache.get(cacheKey);
-    
-    if (audioUrl) {
-      console.log(`[Twilio Service] ⚡ Using cached greeting (instant!)`);
+    if (audioBuffer) {
+      // Upload to storage or use data URI
+      const audioUrl = await this.storage.uploadAudio(audioBuffer, 'greeting');
+      
+      console.log('[Twilio Service] ✅ Using ElevenLabs voice');
       twiml.play(audioUrl);
     } else {
-      // Generate new audio with ElevenLabs
-      const audioBuffer = await this.elevenLabs.generateAudio(greeting, region, 'Male');
-      
-      if (audioBuffer) {
-        // Upload to storage
-        audioUrl = await this.storage.uploadAudio(audioBuffer, 'greeting');
-        
-        // ⚡ CACHE IT (1 hour TTL)
-        this.greetingCache.set(cacheKey, audioUrl);
-        setTimeout(() => this.greetingCache.delete(cacheKey), 3600000);
-        
-        const elapsedTime = Date.now() - startTime;
-        console.log(`[Twilio Service] ✅ Greeting generated in ${elapsedTime}ms`);
-        twiml.play(audioUrl);
-      } else {
-        // Fallback to AWS Polly
-        console.log('[Twilio Service] ⚠️  Falling back to AWS Polly');
-        twiml.say({
-          voice: 'Polly.Matthew',
-          language: 'en-GB'
-        }, greeting);
-      }
+      // Fallback to AWS Polly
+      console.log('[Twilio Service] ⚠️  Falling back to AWS Polly');
+      twiml.say({
+        voice: 'Polly.Matthew',
+        language: 'en-GB'
+      }, greeting);
     }
 
-    // Gather user response (⚡ INCREASED TIMEOUT to 60s)
+    // Gather user response
     const gather = twiml.gather({
       input: 'speech',
       action: `${this.webhookBaseUrl}/twilio/gather`,
       method: 'POST',
-      timeout: 60,  // ⚡ INCREASED from default 10s
       speechTimeout: 'auto',
       speechModel: 'phone_call',
       enhanced: true,
@@ -154,10 +133,9 @@ class TwilioService {
   }
 
   // ═══════════════════════════════════════════════════════════
-  // HANDLE USER RESPONSE (WITH ELEVENLABS + OPTIMIZATIONS!)
+  // HANDLE USER RESPONSE (WITH ELEVENLABS!)
   // ═══════════════════════════════════════════════════════════
-  async handleGather(callSid, speechResult, wsServer) {
-    const startTime = Date.now();
+  async handleGather(callSid, speechResult) {
     const twiml = new VoiceResponse();
     const callData = this.activeCalls.get(callSid);
 
@@ -171,113 +149,55 @@ class TwilioService {
     if (!speechResult || speechResult.trim().length === 0) {
       console.log('[Twilio Webhook] No speech detected, re-prompting...');
       twiml.say({ voice: 'Polly.Matthew' }, 'I didn\'t catch that. Could you please repeat?');
-      
-      const gather = twiml.gather({
-        input: 'speech',
-        action: `${this.webhookBaseUrl}/twilio/gather`,
-        method: 'POST',
-        timeout: 60,
-        speechTimeout: 'auto',
-        speechModel: 'phone_call',
-        enhanced: true,
-        language: 'en-GB'
-      });
-      gather.pause({ length: 1 });
-      
+      twiml.redirect(`${this.webhookBaseUrl}/twilio/gather`);
       return twiml.toString();
     }
 
     console.log(`[Twilio Webhook] 🎤 User said: ${speechResult}`);
 
-    // ⚡ OPTIMIZATION: Add "thinking" indicator
-    // This makes the silence feel intentional, not like a bug
-    twiml.pause({ length: 0.5 });
-
-    // Get AI response from Claude (with timeout)
+    // Get AI response from Claude
     const aiResponse = await this._getClaudeResponse(callData, speechResult);
     
     if (!aiResponse) {
-      console.error('[Twilio Webhook] No AI response - using fallback');
       twiml.say({ voice: 'Polly.Matthew' }, 'I apologize, I\'m having trouble processing that. Let me try again.');
-      
-      const gather = twiml.gather({
-        input: 'speech',
-        action: `${this.webhookBaseUrl}/twilio/gather`,
-        method: 'POST',
-        timeout: 60,
-        speechTimeout: 'auto',
-        speechModel: 'phone_call',
-        enhanced: true,
-        language: 'en-GB'
-      });
-      gather.pause({ length: 1 });
-      
+      twiml.redirect(`${this.webhookBaseUrl}/twilio/gather`);
       return twiml.toString();
     }
 
-    console.log(`[Twilio Webhook] 🤖 AI response: ${aiResponse.text.substring(0, 80)}...`);
+    console.log(`[Twilio Webhook] 🤖 AI response: ${aiResponse.text.substring(0, 100)}...`);
 
-    // 🔥 BROADCAST INTENTSCORE TO DASHBOARD
-    if (wsServer && aiResponse.score !== undefined) {
-      const signals = [];
-      if (aiResponse.signal) {
-        signals.push(aiResponse.signal);
-      }
-      
-      wsServer.broadcast({
-        type: 'event',
-        event: 'intentScore',
-        payload: {
-          score: aiResponse.score,
-          signals: signals,
-          callSid: callSid,
-          prospectName: callData.prospectName,
-          region: callData.region,
-          timestamp: new Date().toISOString()
-        }
-      });
-      
-      console.log(`[WebSocket] 📊 Broadcast IntentScore: ${aiResponse.score}`);
-    }
-
-    // ⚡ PARALLEL PROCESSING: Start ElevenLabs generation immediately
-    const audioPromise = this.elevenLabs.generateAudio(
+    // Generate audio with ElevenLabs
+    const audioBuffer = await this.elevenLabs.generateAudio(
       aiResponse.text, 
       callData.region, 
       'Male'
     );
 
-    // While audio generates, prepare the rest of TwiML
+    if (audioBuffer) {
+      // Upload to storage or use data URI
+      const audioUrl = await this.storage.uploadAudio(audioBuffer, callSid);
+      
+      console.log('[Twilio Webhook] ✅ Playing ElevenLabs voice');
+      twiml.play(audioUrl);
+    } else {
+      // Fallback to AWS Polly
+      console.log('[Twilio Webhook] ⚠️  Falling back to AWS Polly');
+      twiml.say({
+        voice: 'Polly.Matthew',
+        language: 'en-GB'
+      }, aiResponse.text);
+    }
+
+    // Continue gathering
     const gather = twiml.gather({
       input: 'speech',
       action: `${this.webhookBaseUrl}/twilio/gather`,
       method: 'POST',
-      timeout: 60,
       speechTimeout: 'auto',
       speechModel: 'phone_call',
       enhanced: true,
       language: 'en-GB'
     });
-
-    // ⚡ AWAIT audio generation (happens in parallel with above code)
-    const audioBuffer = await audioPromise;
-
-    if (audioBuffer) {
-      // Upload to storage
-      const audioUrl = await this.storage.uploadAudio(audioBuffer, callSid);
-      
-      const elapsedTime = Date.now() - startTime;
-      console.log(`[Twilio Webhook] ✅ Complete response in ${elapsedTime}ms`);
-      
-      gather.play(audioUrl);
-    } else {
-      // Fallback to AWS Polly
-      console.log('[Twilio Webhook] ⚠️  Falling back to AWS Polly');
-      gather.say({
-        voice: 'Polly.Matthew',
-        language: 'en-GB'
-      }, aiResponse.text);
-    }
 
     gather.pause({ length: 1 });
 
@@ -288,8 +208,6 @@ class TwilioService {
   // GET CLAUDE AI RESPONSE
   // ═══════════════════════════════════════════════════════════
   async _getClaudeResponse(callData, userSpeech) {
-    const startTime = Date.now();
-    
     try {
       callData.conversationHistory.push({
         role: 'user',
@@ -298,15 +216,7 @@ class TwilioService {
 
       const systemPrompt = this._getSystemPrompt(callData.scenario, callData.prospectName, callData.region);
 
-      // ⚡ SMART TOKEN ALLOCATION based on context
-      const maxTokens = this._getOptimalTokens(callData, userSpeech);
-
       console.log('[Claude API] 📤 Sending request...');
-      console.log(`[Claude API]    Tokens: ${maxTokens} (dynamic)`);
-
-      // Add timeout wrapper (15 seconds max)
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15000);
 
       const response = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
@@ -317,15 +227,11 @@ class TwilioService {
         },
         body: JSON.stringify({
           model: 'claude-sonnet-4-20250514',
-          max_tokens: maxTokens,  // ⚡ DYNAMIC based on conversation stage
-          temperature: 0.7,
+          max_tokens: 500,
           system: systemPrompt,
           messages: callData.conversationHistory
-        }),
-        signal: controller.signal
+        })
       });
-
-      clearTimeout(timeoutId);
 
       if (!response.ok) {
         const errorText = await response.text();
@@ -334,8 +240,7 @@ class TwilioService {
       }
 
       const data = await response.json();
-      const elapsedTime = Date.now() - startTime;
-      console.log(`[Claude API] ✅ Response received in ${elapsedTime}ms`);
+      console.log('[Claude API] ✅ Response received');
 
       if (data.content && data.content[0]) {
         const fullText = data.content[0].text || '';
@@ -372,54 +277,7 @@ class TwilioService {
 
       return null;
     } catch (error) {
-      const elapsedTime = Date.now() - startTime;
-      
-      if (error.name === 'AbortError') {
-        console.error(`[Claude API] ⏱️ Timeout after ${elapsedTime}ms`);
-      } else {
-        console.error(`[Claude API] ❌ Exception after ${elapsedTime}ms:`, error.message);
-      }
-      
-      return null;
-    }
-  }
-
-  // ⚡ SMART TOKEN ALLOCATION - Balances speed vs quality
-  _getOptimalTokens(callData, userSpeech) {
-    const turnCount = callData.conversationHistory.length / 2; // How many exchanges
-    const userWordCount = userSpeech.split(' ').length;
-    const intentScore = callData.intentScore || 0;
-
-    // RULE 1: First response = keep it short (build rapport quickly)
-    if (turnCount <= 1) {
-      return 180; // Fast but still professional
-    }
-
-    // RULE 2: User gave a long, detailed response = match their energy
-    if (userWordCount > 30) {
-      return 350; // Detailed response deserved
-    }
-
-    // RULE 3: High intent (score 60+) = invest more tokens (they're engaged!)
-    if (intentScore >= 60) {
-      return 300; // They're interested, give them detail
-    }
-
-    // RULE 4: Objection keywords = need detailed response
-    const objectionKeywords = ['but', 'however', 'concern', 'worried', 'expensive', 'not sure', 'think about'];
-    const hasObjection = objectionKeywords.some(kw => userSpeech.toLowerCase().includes(kw));
-    if (hasObjection) {
-      return 320; // Handle objections thoroughly
-    }
-
-    // RULE 5: Short user responses ("yes", "okay", "go on") = keep it moving
-    if (userWordCount < 5) {
-      return 150; // Don't over-talk, they're just acknowledging
-    }
-
-    // DEFAULT: Balanced response (good for most situations)
-    return 220; // Sweet spot: professional but not slow
-  }
+      console.error('[Claude API] ❌ Exception:', error.message);
       return null;
     }
   }
@@ -505,7 +363,7 @@ Start: 22. Increase for: asks about account types (+8), mentions capital (+12), 
 
   // Process user response (wrapper for handleGather)
   async processUserResponse(callSid, speechResult, wsServer) {
-    return await this.handleGather(callSid, speechResult, wsServer);
+    return await this.handleGather(callSid, speechResult);
   }
 
   // Get active calls
