@@ -1,6 +1,6 @@
 // ═══════════════════════════════════════════════════════════
 // SALES360 TWILIO SERVICE - WITH ELEVENLABS VOICE CLONING
-// Your actual voice on every AI response!
+// + DYNAMIC TRADER PROFILING (Phase 3A)
 // ═══════════════════════════════════════════════════════════
 
 const twilio = require('twilio');
@@ -44,21 +44,43 @@ class TwilioService {
   }
 
   // ═══════════════════════════════════════════════════════════
-  // MAKE OUTBOUND CALL
+  // MAKE OUTBOUND CALL (UPDATED FOR TRADER PROFILING)
   // ═══════════════════════════════════════════════════════════
-  async makeCall({ to, prospectName, region, scenario }) {
+  async makeCall({ to, prospectName, region, scenario, callType, traderProfile }) {
     try {
+      // Support both old and new API
+      const actualCallType = callType || scenario || 'broker';
+      const actualRegion = region || (traderProfile ? traderProfile.region : 'UK');
+      
       const callData = {
         prospectName,
-        region,
-        scenario,
+        region: actualRegion,
+        scenario: actualCallType,
+        traderProfile: traderProfile || null, // NEW: Store trader profile
         conversationHistory: [],
         startTime: new Date().toISOString(),
-        intentScore: this._getStartingScore(scenario)
+        intentScore: this._getStartingScore(actualCallType, traderProfile)
       };
 
+      console.log(`[Twilio Service] 📞 Initiating call to ${prospectName}`);
+      if (traderProfile) {
+        console.log(`[Twilio Service] 👤 Trader Profile:`, JSON.stringify(traderProfile, null, 2));
+      }
+
+      // Build webhook URL with all parameters
+      const webhookParams = new URLSearchParams({
+        prospectName,
+        region: actualRegion,
+        scenario: actualCallType
+      });
+      
+      // If trader profile exists, add it
+      if (traderProfile) {
+        webhookParams.append('traderProfile', JSON.stringify(traderProfile));
+      }
+
       const call = await this.client.calls.create({
-        url: `${this.webhookBaseUrl}/twilio/voice?prospectName=${encodeURIComponent(prospectName)}&region=${encodeURIComponent(region)}&scenario=${encodeURIComponent(scenario)}`,
+        url: `${this.webhookBaseUrl}/twilio/voice?${webhookParams.toString()}`,
         to: to,
         from: this.phoneNumber,
         statusCallback: `${this.webhookBaseUrl}/twilio/status`,
@@ -71,10 +93,10 @@ class TwilioService {
 
       this.activeCalls.set(call.sid, callData);
       
-      console.log(`[Twilio Service] 📞 Call initiated: ${call.sid}`);
+      console.log(`[Twilio Service] ✅ Call initiated: ${call.sid}`);
       console.log(`[Twilio Service]    To: ${to}`);
-      console.log(`[Twilio Service]    Region: ${region}`);
-      console.log(`[Twilio Service]    Scenario: ${scenario}`);
+      console.log(`[Twilio Service]    Type: ${actualCallType}`);
+      console.log(`[Twilio Service]    Region: ${actualRegion}`);
 
       return {
         success: true,
@@ -93,15 +115,21 @@ class TwilioService {
   }
 
   // ═══════════════════════════════════════════════════════════
-  // GENERATE OPENING GREETING (WITH ELEVENLABS + CACHING!)
+  // GENERATE OPENING GREETING (WITH ELEVENLABS + DYNAMIC PROFILING!)
   // ═══════════════════════════════════════════════════════════
-  async generateGreetingTwiML(prospectName, region, scenario) {
+  async generateGreetingTwiML(prospectName, region, scenario, traderProfile = null) {
     const startTime = Date.now();
     const twiml = new VoiceResponse();
-    const greeting = this._getGreeting(scenario, prospectName, region);
+    
+    // Use dynamic greeting if trader profile exists
+    const greeting = traderProfile 
+      ? this._getDynamicGreeting(prospectName, traderProfile)
+      : this._getGreeting(scenario, prospectName, region);
     
     // ⚡ OPTIMIZATION: Check cache first
-    const cacheKey = `${scenario}-${region}`;
+    const cacheKey = traderProfile 
+      ? `${traderProfile.leadType}-${traderProfile.age}-${traderProfile.region}`
+      : `${scenario}-${region}`;
     
     console.log(`[Twilio Service] 🎤 Generating greeting...`);
     console.log(`[Twilio Service]    Cache key: ${cacheKey}`);
@@ -190,10 +218,9 @@ class TwilioService {
     console.log(`[Twilio Webhook] 🎤 User said: ${speechResult}`);
 
     // ⚡ OPTIMIZATION: Add "thinking" indicator
-    // This makes the silence feel intentional, not like a bug
     twiml.pause({ length: 0.5 });
 
-    // Get AI response from Claude (with timeout)
+    // Get AI response from Claude (with dynamic profiling)
     const aiResponse = await this._getClaudeResponse(callData, speechResult);
     
     if (!aiResponse) {
@@ -221,33 +248,47 @@ class TwilioService {
     if (wsServer && aiResponse.score !== undefined) {
       const signals = [];
       if (aiResponse.signal) {
-        signals.push(aiResponse.signal);
+        signals.push({
+          type: aiResponse.signalType || 'neutral',
+          label: aiResponse.signal,
+          delta: aiResponse.delta || 0
+        });
       }
-      
+
       wsServer.broadcast({
-        type: 'event',
-        event: 'intentScore',
-        payload: {
-          score: aiResponse.score,
-          signals: signals,
-          callSid: callSid,
-          prospectName: callData.prospectName,
-          region: callData.region,
-          timestamp: new Date().toISOString()
+        type: 'callUpdate',
+        callSid,
+        intentScore: aiResponse.score,
+        signals,
+        transcript: {
+          role: 'assistant',
+          text: aiResponse.text
         }
       });
-      
-      console.log(`[WebSocket] 📊 Broadcast IntentScore: ${aiResponse.score}`);
     }
 
-    // ⚡ PARALLEL PROCESSING: Start ElevenLabs generation immediately
-    const audioPromise = this.elevenLabs.generateAudio(
+    // Generate audio with ElevenLabs
+    const audioBuffer = await this.elevenLabs.generateAudio(
       aiResponse.text, 
       callData.region, 
       'Male'
     );
 
-    // While audio generates, prepare the rest of TwiML
+    if (audioBuffer) {
+      const audioUrl = await this.storage.uploadAudio(audioBuffer, 'response');
+      const elapsedTime = Date.now() - startTime;
+      console.log(`[Twilio Service] ✅ Full response generated in ${elapsedTime}ms`);
+      
+      twiml.play(audioUrl);
+    } else {
+      console.log('[Twilio Service] ⚠️  Falling back to AWS Polly for response');
+      twiml.say({
+        voice: 'Polly.Matthew',
+        language: 'en-GB'
+      }, aiResponse.text);
+    }
+
+    // Continue gathering
     const gather = twiml.gather({
       input: 'speech',
       action: `${this.webhookBaseUrl}/twilio/gather`,
@@ -258,55 +299,38 @@ class TwilioService {
       enhanced: true,
       language: 'en-GB'
     });
-
-    // ⚡ AWAIT audio generation (happens in parallel with above code)
-    const audioBuffer = await audioPromise;
-
-    if (audioBuffer) {
-      // Upload to storage
-      const audioUrl = await this.storage.uploadAudio(audioBuffer, callSid);
-      
-      const elapsedTime = Date.now() - startTime;
-      console.log(`[Twilio Webhook] ✅ Complete response in ${elapsedTime}ms`);
-      
-      gather.play(audioUrl);
-    } else {
-      // Fallback to AWS Polly
-      console.log('[Twilio Webhook] ⚠️  Falling back to AWS Polly');
-      gather.say({
-        voice: 'Polly.Matthew',
-        language: 'en-GB'
-      }, aiResponse.text);
-    }
-
     gather.pause({ length: 1 });
 
     return twiml.toString();
   }
 
   // ═══════════════════════════════════════════════════════════
-  // GET CLAUDE AI RESPONSE
+  // GET CLAUDE RESPONSE (WITH DYNAMIC PROMPTING!)
   // ═══════════════════════════════════════════════════════════
   async _getClaudeResponse(callData, userSpeech) {
     const startTime = Date.now();
-    
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+
     try {
       callData.conversationHistory.push({
         role: 'user',
         content: userSpeech
       });
 
-      const systemPrompt = this._getSystemPrompt(callData.scenario, callData.prospectName, callData.region);
+      // ⚡ BUILD DYNAMIC SYSTEM PROMPT
+      const systemPrompt = callData.traderProfile
+        ? this._buildDynamicPrompt(callData.prospectName, callData.scenario, callData.traderProfile)
+        : this._getSystemPrompt(callData.scenario, callData.prospectName, callData.region);
 
-      // ⚡ SMART TOKEN ALLOCATION based on context
+      console.log(`[Claude API] 📤 Sending request (turn ${callData.conversationHistory.length / 2})`);
+      console.log(`[Claude API] 📊 Current IntentScore: ${callData.intentScore}`);
+      if (callData.traderProfile) {
+        console.log(`[Claude API] 👤 Profile: ${callData.traderProfile.age}yo ${callData.traderProfile.region} ${callData.traderProfile.experience}`);
+      }
+
       const maxTokens = this._getOptimalTokens(callData, userSpeech);
-
-      console.log('[Claude API] 📤 Sending request...');
-      console.log(`[Claude API]    Tokens: ${maxTokens} (dynamic)`);
-
-      // Add timeout wrapper (15 seconds max)
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15000);
+      console.log(`[Claude API] 🎯 Using ${maxTokens} tokens for this response`);
 
       const response = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
@@ -317,19 +341,18 @@ class TwilioService {
         },
         body: JSON.stringify({
           model: 'claude-sonnet-4-20250514',
-          max_tokens: maxTokens,  // ⚡ DYNAMIC based on conversation stage
-          temperature: 0.7,
+          max_tokens: maxTokens,
           system: systemPrompt,
           messages: callData.conversationHistory
         }),
         signal: controller.signal
       });
 
-      clearTimeout(timeoutId);
+      clearTimeout(timeout);
 
       if (!response.ok) {
-        const errorText = await response.text();
-        console.error('[Claude API] ❌ Error:', response.status, errorText);
+        const error = await response.text();
+        console.error('[Claude API] ❌ API Error:', error);
         return null;
       }
 
@@ -366,7 +389,8 @@ class TwilioService {
           text: aiText,
           score: callData.intentScore,
           signal: scoreData ? scoreData.signal : null,
-          signalType: scoreData ? scoreData.signal_type : null
+          signalType: scoreData ? scoreData.signal_type : null,
+          delta: scoreData ? scoreData.delta : null
         };
       }
 
@@ -386,46 +410,123 @@ class TwilioService {
 
   // ⚡ SMART TOKEN ALLOCATION - Balances speed vs quality
   _getOptimalTokens(callData, userSpeech) {
-    const turnCount = callData.conversationHistory.length / 2; // How many exchanges
+    const turnCount = callData.conversationHistory.length / 2;
     const userWordCount = userSpeech.split(' ').length;
     const intentScore = callData.intentScore || 0;
 
-    // RULE 1: First response = keep it short (build rapport quickly)
-    if (turnCount <= 1) {
-      return 180; // Fast but still professional
-    }
+    if (turnCount <= 1) return 180;
+    if (userWordCount > 30) return 350;
+    if (intentScore >= 60) return 300;
 
-    // RULE 2: User gave a long, detailed response = match their energy
-    if (userWordCount > 30) {
-      return 350; // Detailed response deserved
-    }
-
-    // RULE 3: High intent (score 60+) = invest more tokens (they're engaged!)
-    if (intentScore >= 60) {
-      return 300; // They're interested, give them detail
-    }
-
-    // RULE 4: Objection keywords = need detailed response
     const objectionKeywords = ['but', 'however', 'concern', 'worried', 'expensive', 'not sure', 'think about'];
     const hasObjection = objectionKeywords.some(kw => userSpeech.toLowerCase().includes(kw));
-    if (hasObjection) {
-      return 320; // Handle objections thoroughly
-    }
+    if (hasObjection) return 320;
 
-    // RULE 5: Short user responses ("yes", "okay", "go on") = keep it moving
-    if (userWordCount < 5) {
-      return 150; // Don't over-talk, they're just acknowledging
-    }
+    if (userWordCount < 5) return 150;
 
-    // DEFAULT: Balanced response (good for most situations)
-    return 220; // Sweet spot: professional but not slow
+    return 220;
   }
 
   // ═══════════════════════════════════════════════════════════
-  // HELPER METHODS (same as before)
+  // DYNAMIC PROMPT BUILDER (NEW FOR PHASE 3A)
+  // ═══════════════════════════════════════════════════════════
+  _buildDynamicPrompt(prospectName, callType, traderProfile) {
+    const { age, gender, region, product, experience, leadType, communicationStyle } = traderProfile;
+
+    // Cultural context
+    let culturalContext = '';
+    if (region === 'Nigeria') {
+      if (age < 30) {
+        culturalContext = `CULTURAL CONTEXT: Nigeria — Young demographic (22-30). Use friendly, relatable tone. "Bro" energy is fine. WhatsApp-first culture. Casual but respectful.`;
+      } else if (age > 45) {
+        culturalContext = `CULTURAL CONTEXT: Nigeria — MATURE demographic (46+). Use respectful elder address: "Sir", "Chief" (if title known). Patience is key. Build trust slowly. Very respectful tone.`;
+      } else {
+        culturalContext = `CULTURAL CONTEXT: Nigeria — Mid demographic (31-45). Professional but warm. WhatsApp-first culture. Balanced approach.`;
+      }
+    } else if (region === 'United Kingdom' || region === 'UK') {
+      culturalContext = `CULTURAL CONTEXT: UK — Professional, clear communication. ${age > 40 ? 'Senior professional' : 'Mid-career professional'}. GDPR-compliant. Email-first culture.`;
+    } else if (region === 'Dubai' || region === 'UAE') {
+      culturalContext = `CULTURAL CONTEXT: Dubai — Fast-paced, prestige-focused. Respect wealth and status. DIFC-compliant. Time is money — be efficient.`;
+    } else if (region === 'South Africa') {
+      culturalContext = `CULTURAL CONTEXT: South Africa — Direct, honest communication. Values results over fluff.`;
+    }
+
+    // Starting score logic
+    let startScore = 20;
+    if (leadType === 'inbound_hot') startScore = 38;
+    else if (leadType === 'inbound_warm') startScore = 28;
+    else if (leadType === 'outbound_targeted') startScore = 23;
+    else if (leadType === 'outbound_cold') startScore = 15;
+    else if (leadType === 'retention') startScore = 20;
+
+    if (experience === 'advanced') startScore += 7;
+    else if (experience === 'beginner') startScore -= 2;
+
+    // Opening hook
+    const timeOfDay = new Date().getHours() < 12 ? 'morning' : new Date().getHours() < 17 ? 'afternoon' : 'evening';
+    let opening = '';
+    
+    if (leadType === 'inbound_warm') {
+      opening = `Good ${timeOfDay}, ${prospectName}! This is the AI assistant from HFM. I'm following up on your recent inquiry about ${product}. Do you have a couple of minutes?`;
+    } else if (leadType === 'inbound_hot') {
+      opening = `Good ${timeOfDay}, ${prospectName}! This is the AI assistant from HFM. I noticed you signed up but haven't completed your first trade yet. What's holding you back?`;
+    } else if (leadType === 'outbound_cold' && age > 45) {
+      opening = `Good ${timeOfDay}, ${gender === 'Male' ? 'Sir' : 'Madam'}. This is the AI assistant from HFM. Am I speaking with ${prospectName}?`;
+    } else {
+      opening = `Hi ${prospectName}! This is the AI assistant from HFM. Quick question: are you currently trading forex, or is it something you've been curious about?`;
+    }
+
+    return `You are ${age > 45 && region === 'Nigeria' ? 'a senior sales representative' : 'an AI sales assistant'} for a forex brokerage. You're calling ${prospectName} (${age}, ${region}).
+
+${culturalContext}
+
+CALL TYPE: ${leadType.replace('_', ' ').toUpperCase()}
+EXPERIENCE: ${experience}
+COMMUNICATION STYLE: ${communicationStyle || 'balanced'}
+
+BREVITY RULES:
+- ONE idea per turn maximum
+- Aim for 1-2 sentences (15-25 words max)
+- Use contractions naturally
+- Match prospect's energy
+
+SALES PSYCHOLOGY:
+- LISTEN FIRST — ask clarifying questions
+- ${leadType === 'retention' ? 'Empathy + solutions' : 'Pre-emptive objection handling'}
+- ${experience === 'beginner' ? 'Education focus' : experience === 'advanced' ? 'Performance focus' : 'Value-driven approach'}
+
+After EVERY response, append JSON:
+{"score":<integer>,"delta":<integer>,"signal":"<short label>","signal_type":"<pain|intent|buy|neutral>"}
+
+Start: ${startScore}. Max change: 20. Never exceed 100.
+
+OPENING LINE (use exactly this):
+"${opening}"`;
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // HELPER METHODS (LEGACY + NEW)
   // ═══════════════════════════════════════════════════════════
   
-  _getStartingScore(scenario) {
+  _getStartingScore(scenario, traderProfile) {
+    if (traderProfile) {
+      // Dynamic scoring based on lead type
+      const { leadType, experience } = traderProfile;
+      let score = 20;
+      
+      if (leadType === 'inbound_hot') score = 38;
+      else if (leadType === 'inbound_warm') score = 28;
+      else if (leadType === 'outbound_targeted') score = 23;
+      else if (leadType === 'outbound_cold') score = 15;
+      else if (leadType === 'retention') score = 20;
+      
+      if (experience === 'advanced') score += 7;
+      else if (experience === 'beginner') score -= 2;
+      
+      return score;
+    }
+    
+    // Legacy scoring
     const scores = {
       'broker': 28,
       'trader': 22
@@ -438,6 +539,22 @@ class TwilioService {
       return `Good afternoon ${name.split(' ')[0]}, this is Sales360 AI. I'm calling following your enquiry about reducing trader churn and improving qualification. Do you have a couple of minutes?`;
     } else {
       return `Hey ${name.split(' ')[0]}! This is Sales360 AI calling. I saw you signed up a couple days back but haven't activated your account yet. What's up with that?`;
+    }
+  }
+
+  _getDynamicGreeting(name, traderProfile) {
+    const { age, region, leadType, product } = traderProfile;
+    const firstName = name.split(' ')[0];
+    const timeOfDay = new Date().getHours() < 12 ? 'morning' : new Date().getHours() < 17 ? 'afternoon' : 'evening';
+    
+    if (leadType === 'inbound_warm') {
+      return `Good ${timeOfDay}, ${firstName}! This is the AI assistant from HFM. I'm following up on your recent inquiry about ${product}. Do you have a couple of minutes?`;
+    } else if (leadType === 'inbound_hot') {
+      return `Good ${timeOfDay}, ${firstName}! This is the AI assistant from HFM. I noticed you signed up but haven't completed your first trade yet. What's holding you back?`;
+    } else if (leadType === 'outbound_cold' && age > 45) {
+      return `Good ${timeOfDay}, ${traderProfile.gender === 'Male' ? 'Sir' : 'Madam'}. This is the AI assistant from HFM. Am I speaking with ${name}?`;
+    } else {
+      return `Hi ${firstName}! This is the AI assistant from HFM. Quick question: are you trading right now, or is it something you've been thinking about?`;
     }
   }
 
@@ -495,17 +612,14 @@ Start: 22. Increase for: asks about account types (+8), mentions capital (+12), 
     }
   }
 
-  // Alias for call-routes compatibility
   handleStatusUpdate(callSid, status, body) {
     return this.handleStatus(callSid, status);
   }
 
-  // Process user response (wrapper for handleGather)
   async processUserResponse(callSid, speechResult, wsServer) {
     return await this.handleGather(callSid, speechResult, wsServer);
   }
 
-  // Get active calls
   getActiveCalls() {
     const calls = [];
     this.activeCalls.forEach((data, sid) => {
@@ -522,12 +636,10 @@ Start: 22. Increase for: asks about account types (+8), mentions capital (+12), 
     return calls;
   }
 
-  // Get call details
   getCallDetails(callSid) {
     return this.activeCalls.get(callSid);
   }
 
-  // End call
   async endCall(callSid) {
     try {
       await this.client.calls(callSid).update({ status: 'completed' });
