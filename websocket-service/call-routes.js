@@ -24,10 +24,11 @@ function setupCallRoutes(wsServer, twilioService, elevenLabsService) {
   // API ROUTES
   // ═══════════════════════════════════════════════════════════
 
-  // Make outbound call (UPDATED FOR TRADER PROFILING)
+  // Make outbound call (UPDATED FOR TRADER PROFILING + MANDATORY ZOHO ENRICHMENT)
   router.post('/api/call/make', async (req, res) => {
     try {
-      const { to, prospectName, region, scenario, callType, traderProfile } = req.body;
+      const { to, prospectName, region, scenario, callType, traderProfile, leadId } = req.body;
+      // ✅ CRITICAL FIX: Extract leadId from request body
 
       if (!to || !prospectName) {
         return res.status(400).json({
@@ -36,8 +37,17 @@ function setupCallRoutes(wsServer, twilioService, elevenLabsService) {
         });
       }
 
+      // ✅ CRITICAL FIX: Validate leadId is present
+      if (!leadId || !leadId.trim()) {
+        return res.status(400).json({
+          success: false,
+          error: 'Missing required field: leadId (Zoho CRM Lead ID is mandatory for all calls)'
+        });
+      }
+
       console.log('[Call API] /call/make request received');
       console.log('[Call API] Payload:', JSON.stringify(req.body, null, 2));
+      console.log('[Call API] ✅ leadId received:', leadId);
 
       // Support both old and new API formats
       const result = await twilioService.makeCall({
@@ -46,7 +56,8 @@ function setupCallRoutes(wsServer, twilioService, elevenLabsService) {
         region: region || (traderProfile ? traderProfile.region : 'UK'),
         scenario: scenario || callType || 'broker',
         callType: callType || scenario || 'broker',
-        traderProfile: traderProfile || null
+        traderProfile: traderProfile || null,
+        leadId: leadId.trim() // ✅ CRITICAL FIX: Pass leadId to Twilio service
       });
 
       res.json(result);
