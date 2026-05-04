@@ -1,9 +1,7 @@
 // ═══════════════════════════════════════════════════════════════
-// SALES360 ZOHO CRM SERVICE - PHASE 3C FINAL
-// CRITICAL FIXES:
-// 1. SmartScore_intent1 (lowercase "i" + "1") - CORRECT API NAME
-// 2. Mandatory pre-call Zoho Deluge function enrichment
-// 3. Enhanced logging for B2B/B2C routing diagnostics
+// SALES360 ZOHO CRM SERVICE - CHATGPT ALIGNED
+// Phase 3C: AI Calling Agent Integration
+// Follows: SALES360 AI CALLING AGENT ↔ SMARTCORE ↔ ZOHO EXECUTION GUIDE
 // ═══════════════════════════════════════════════════════════════
 
 class ZohoService {
@@ -14,11 +12,10 @@ class ZohoService {
     this.apiDomain = process.env.ZOHO_API_DOMAIN || 'https://www.zohoapis.eu';
     this.smartcoreUrl = process.env.SMARTCORE_URL || 'https://sales360-smartcore-production.up.railway.app';
     
-    // ✅ ZOHO DELUGE FUNCTION ENDPOINTS (OAuth2-enabled REST APIs)
-    this.delugePreCallFetch = `${this.apiDomain}/crm/v7/functions/sales360_pre_call_fetch/actions/execute`;
-    this.delugeUpdateScore = `${this.apiDomain}/crm/v7/functions/sales360_update_intent_score/actions/execute`;
-    
-    this.USE_FLAT_PAYLOAD = process.env.SMARTCORE_USE_FLAT_PAYLOAD !== 'false';
+    // ✅ FIX 1: SmartCore payload compatibility toggle
+    // Set to true for flat payload (new architecture)
+    // Set to false for wrapped payload (legacy compatibility)
+    this.USE_FLAT_PAYLOAD = process.env.SMARTCORE_USE_FLAT_PAYLOAD !== 'false'; // Default: true
     
     if (!this.clientId || !this.clientSecret || !this.refreshToken) {
       console.warn('[Zoho Service] ⚠️  Missing Zoho credentials - CRM integration disabled');
@@ -27,11 +24,11 @@ class ZohoService {
       console.log('[Zoho Service] ✅ Initialized');
       console.log('[Zoho Service] API Domain:', this.apiDomain);
       console.log('[Zoho Service] SmartCore URL:', this.smartcoreUrl);
-      console.log('[Zoho Service] Deluge Pre-Call:', this.delugePreCallFetch);
-      console.log('[Zoho Service] Deluge Update Score:', this.delugeUpdateScore);
+      console.log('[Zoho Service] Payload Format:', this.USE_FLAT_PAYLOAD ? 'FLAT (new)' : 'WRAPPED (legacy)');
       this.enabled = true;
     }
     
+    // ✅ FIX 3: Validate SmartCore API key
     if (process.env.SMARTCORE_API_KEY) {
       console.log('[Zoho Service] 🔑 SmartCore API key configured');
     } else {
@@ -93,118 +90,11 @@ class ZohoService {
   }
 
   // ═══════════════════════════════════════════════════════════════
-  // ✅ NEW: MANDATORY PRE-CALL ENRICHMENT VIA DELUGE FUNCTION
-  // Replaces direct CRM API fetch with standalone Deluge function
-  // Returns: Full lead context for AI prompt selection
-  // ═══════════════════════════════════════════════════════════════
-  
-  async enrichLeadBeforeCall(leadId) {
-    if (!this.enabled) {
-      console.warn('[Zoho PreCall] CRM integration disabled - returning null');
-      return null;
-    }
-
-    console.log(`[Zoho PreCall] 🔍 Fetch started for leadId: ${leadId}`);
-
-    try {
-      const token = await this.getAccessToken();
-      if (!token) {
-        console.error('[Zoho PreCall] ❌ No access token available');
-        return null;
-      }
-
-      // Call Zoho Deluge standalone function
-      const response = await fetch(this.delugePreCallFetch, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Zoho-oauthtoken ${token}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          arguments: JSON.stringify({ leadId })
-        })
-      });
-
-      if (!response.ok) {
-        const error = await response.text();
-        console.error('[Zoho PreCall] ❌ Deluge function call failed:', error);
-        return null;
-      }
-
-      const data = await response.json();
-      
-      console.log('[Zoho PreCall] 📥 Raw response:', JSON.stringify(data));
-
-      // Extract output from Deluge function response
-      const output = data.details?.output;
-      
-      if (!output || !output.success) {
-        console.error('[Zoho PreCall] ❌ Deluge function returned error:', output?.error || 'Unknown error');
-        return null;
-      }
-
-      // Parse lead data from Deluge response
-      const leadData = {
-        leadId: output.lead_id,
-        fullName: output.full_name,
-        email: output.email,
-        phone: output.phone,
-        company: output.company,
-        country: output.country,
-        leadType: output.lead_type || 'B2B',  // ✅ DEFAULT TO B2B
-        intentScore: output.intent_score || 0,
-        behaviourScore: output.behaviour_score || 0,
-        smartcoreScore: output.smartcore_score || 0,
-        stage: output.stage || 'Cold',
-        nextAgent: output.next_agent,
-        lastAgent: output.last_agent,
-        lastTouchAt: output.last_touch_at,
-        lastTouchChannel: output.last_touch_channel,
-        lastOutcome: output.last_outcome,
-        daysSinceLastTouch: output.days_since_last_touch || 0,
-        
-        // B2B-specific data
-        industryType: output.industry_type,
-        interestedServices: output.interested_services,
-        decisionLevel: output.decision_level,
-        currentChallenges: output.current_challenges,
-        budgetReadiness: output.budget_readiness,
-        businessSize: output.business_size,
-        monthlyLeadsVolume: output.monthly_leads_volume || 0,
-        entryChannel: output.entry_channel,
-        leadSource: output.lead_source
-      };
-
-      // ✅ DIAGNOSTIC LOGGING (ChatGPT requirement)
-      console.log(`[Zoho PreCall] ✅ Parsed lead_type: ${leadData.leadType}`);
-      console.log(`[Zoho PreCall] ✅ Parsed intent_score: ${leadData.intentScore}`);
-      console.log(`[Zoho PreCall] ✅ Parsed behaviour_score: ${leadData.behaviourScore}`);
-      console.log(`[Zoho PreCall] ✅ Parsed stage: ${leadData.stage}`);
-      
-      // Select prompt branch based on Lead_Type
-      const promptBranch = leadData.leadType === 'B2C' 
-        ? 'B2C trader/end-user' 
-        : 'B2B client acquisition';
-      
-      console.log(`[Zoho PreCall] 🎯 Prompt branch selected: ${promptBranch}`);
-      console.log(`[Zoho PreCall] ✅ Enrichment complete for: ${leadData.fullName}`);
-
-      return leadData;
-
-    } catch (error) {
-      console.error('[Zoho PreCall] ❌ Exception:', error.message);
-      return null;
-    }
-  }
-
-  // ═══════════════════════════════════════════════════════════════
-  // ✅ LEGACY: DIRECT CRM API FETCH (DEPRECATED - USE enrichLeadBeforeCall)
-  // Kept for backward compatibility
+  // FETCH LEAD FOR PRE-CALL CONTEXT
+  // Uses: SmartScore_Intent1, SmartScore_Behaviour, SmartScore_Next_Agent
   // ═══════════════════════════════════════════════════════════════
   
   async fetchLeadForCall(leadId) {
-    console.warn('[Zoho Service] ⚠️  Using LEGACY fetchLeadForCall - prefer enrichLeadBeforeCall instead');
-    
     if (!this.enabled) {
       console.warn('[Zoho Service] CRM integration disabled - returning null');
       return null;
@@ -243,7 +133,7 @@ class ZohoService {
 
       const lead = data.data[0];
 
-      // Extract relevant fields (CORRECTED FIELD NAMES)
+      // Extract relevant fields for AI context (CHATGPT-ALIGNED FIELDS)
       const leadContext = {
         id: lead.id,
         fullName: lead.Full_Name || '',
@@ -253,28 +143,35 @@ class ZohoService {
         country: lead.Country || '',
         region: this._mapCountryToRegion(lead.Country || ''),
         
+        // ✅ B2B/B2C CLASSIFICATION (ChatGPT aligned)
+        // DEFAULT TO B2B (Sales360's primary ICP: brokers, exchanges, agencies)
+        // ONLY default to B2C when explicitly set
         leadType: lead.Lead_Type || 'B2B',
         
-        // ✅ CRITICAL FIX: SmartScore_intent1 (lowercase "i" + "1")
-        intentScore: lead.SmartScore_intent1 || 0,           // ✅ CORRECTED
-        behaviourScore: lead.SmartScore_Behaviour || 0,
-        smartcoreScore: lead.SmartCore_Score || 0,
-        stage: lead.SmartStage || 'Cold',
-        nextAgent: lead.SmartScore_Next_Agent || null,
-        lastAgent: lead.SmartLastAgent || null,
+        // ✅ CHATGPT-ALIGNED: Sales360 Smart fields (CORRECT NAMES)
+        intentScore: lead.SmartScore_Intent1 || 0,           // ✅ CORRECT
+        behaviourScore: lead.SmartScore_Behaviour || 0,      // ✅ CORRECT
+        smartcoreScore: lead.SmartCore_Score || 0,           // ✅ CORRECT
+        stage: lead.SmartStage || 'Cold',                    // ✅ CORRECT
+        nextAgent: lead.SmartScore_Next_Agent || null,       // ✅ CORRECT
+        lastAgent: lead.SmartLastAgent || null,              // ✅ NEW (ChatGPT directive)
         lastTouchAt: lead.SmartLastTouchAt || null,
         lastTouchChannel: lead.SmartLastTouchChannel || null,
         lastOutcome: lead.SmartLastOutcome || null,
         
+        // Qualification data
         industryType: lead.Industry_Type || '',
         interestedServices: lead.Interested_Services || '',
         decisionLevel: lead.Decision_Level || '',
         currentChallenges: lead.Current_Challenges || '',
         budgetReadiness: lead.Budget_Readiness || '',
+        
+        // ✅ CONTEXT ENRICHMENT: Solo vs Corporate detection
         businessSize: lead.Business_Size || '',
         monthlyLeadsVolume: lead.Monthly_Leads_No || 0
       };
       
+      // ✅ SAFEGUARD: Check for empty string and log warning
       if (!leadContext.leadType || leadContext.leadType.trim() === '') {
         console.warn(`[Zoho Service] ⚠️ LEAD_TYPE_MISSING for ${leadId} → Defaulted to B2B`);
         leadContext.leadType = 'B2B';
@@ -282,6 +179,8 @@ class ZohoService {
 
       console.log('[Zoho Service] ✅ Lead fetched successfully');
       console.log('[Zoho Service] Lead:', leadContext.fullName, '| Type:', leadContext.leadType);
+      console.log('[Zoho Service] IntentScore:', leadContext.intentScore, '| BehaviourScore:', leadContext.behaviourScore);
+      console.log('[Zoho Service] Stage:', leadContext.stage, '| Next Agent:', leadContext.nextAgent);
 
       return leadContext;
 
@@ -292,8 +191,9 @@ class ZohoService {
   }
 
   // ═══════════════════════════════════════════════════════════════
-  // ✅ UPDATE INTENTSCORE IN REAL-TIME VIA DELUGE FUNCTION
-  // Called DURING active call to update IntentScore + BehaviourScore
+  // UPDATE INTENTSCORE IN REAL-TIME (DURING CALL)
+  // ✅ OPTIMIZED: Only updates IntentScore during call
+  // ✅ BehaviourScore tracked locally, updated at call end
   // ═══════════════════════════════════════════════════════════════
   
   async updateIntentScore(leadId, intentScore, behaviourDelta = 0) {
@@ -309,42 +209,38 @@ class ZohoService {
         return false;
       }
 
-      // ✅ RELIABILITY: Cap IntentScore 0-100
-      const cappedScore = Math.max(0, Math.min(100, intentScore));
-      
-      console.log(`[Zoho Service] 📊 Live IntentScore update: leadId=${leadId}, score=${cappedScore}, behaviourDelta=${behaviourDelta}`);
+      console.log(`[Zoho Service] 📊 Updating IntentScore for lead ${leadId}: ${intentScore}`);
 
-      // Call Zoho Deluge standalone function
-      const response = await fetch(this.delugeUpdateScore, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Zoho-oauthtoken ${token}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          arguments: JSON.stringify({
-            leadId,
-            score: cappedScore,
-            behaviourDelta
-          })
-        })
-      });
+      // ✅ OPTIMIZED: Update SmartScore_Intent1 + SmartLastTouchAt ONLY
+      // BehaviourScore is tracked locally and updated at call end (no GET needed)
+      // DO NOT update SmartStage - SmartCore decides that after call
+      const updateData = {
+        data: [{
+          id: leadId,
+          SmartScore_Intent1: intentScore,
+          SmartLastTouchAt: new Date().toISOString()
+        }]
+      };
+
+      const response = await fetch(
+        `${this.apiDomain}/crm/v2/Leads`,
+        {
+          method: 'PUT',
+          headers: {
+            'Authorization': `Zoho-oauthtoken ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(updateData)
+        }
+      );
 
       if (!response.ok) {
         const error = await response.text();
-        console.error('[Zoho Service] ❌ Deluge score update failed:', error);
+        console.error('[Zoho Service] ❌ Score update failed:', error);
         return false;
       }
 
-      const data = await response.json();
-      const output = data.details?.output;
-
-      if (!output || !output.success) {
-        console.error('[Zoho Service] ❌ Deluge function returned error:', output?.error || 'Unknown error');
-        return false;
-      }
-
-      console.log('[Zoho Service] ✅ IntentScore updated via Deluge:', output.intent_score);
+      console.log('[Zoho Service] ✅ IntentScore updated:', intentScore, '| BehaviourScore tracked locally, will update at call end');
 
       return true;
 
@@ -356,6 +252,8 @@ class ZohoService {
 
   // ═══════════════════════════════════════════════════════════════
   // TRIGGER SMARTCORE AFTER CALL COMPLETION
+  // CHATGPT PAYLOAD CONTRACT: B2B/B2C aligned payload
+  // SmartCore decides: SmartStage, task creation, next action
   // ═══════════════════════════════════════════════════════════════
   
   async triggerSmartCore(postCallPayload) {
@@ -369,14 +267,16 @@ class ZohoService {
       console.log(`[Zoho Service] 🚀 Triggering SmartCore for lead: ${leadId}`);
       console.log(`[Zoho Service] Lead Type: ${postCallPayload.lead_type}`);
       console.log(`[Zoho Service] Call outcome: ${postCallPayload.call_outcome}`);
+      console.log(`[Zoho Service] Intent score: ${postCallPayload.intent_score_start} → ${postCallPayload.intent_score_final} (peak: ${postCallPayload.intent_score_peak})`);
 
-      // Update last touch fields in Zoho
+      // ✅ STEP 1: Update last touch fields in Zoho
       const token = await this.getAccessToken();
       if (!token) {
         console.error('[Zoho Service] No access token - cannot update last touch');
         return false;
       }
 
+      // ✅ RELIABILITY FIX 2: Normalize Buyer_Context to valid picklist values
       const normalizedBuyerContext = ['solo', 'corporate'].includes(postCallPayload.buyer_context) 
         ? postCallPayload.buyer_context 
         : 'corporate';
@@ -384,13 +284,13 @@ class ZohoService {
       const updateData = {
         data: [{
           id: leadId,
-          SmartScore_intent1: postCallPayload.intent_score_final,  // ✅ CORRECTED FIELD NAME
-          SmartScore_Behaviour: postCallPayload.behaviour_score_final,
+          SmartScore_Intent1: postCallPayload.intent_score_final,  // ✅ Final score (also updated live during call)
+          SmartScore_Behaviour: postCallPayload.behaviour_score_final,  // ✅ OPTIMIZATION: Only updated at end
           SmartLastTouchAt: new Date().toISOString(),
           SmartLastTouchChannel: postCallPayload.last_touch_channel || 'AI Call',
           SmartLastOutcome: postCallPayload.last_outcome,
           SmartLastAgent: postCallPayload.last_agent,
-          Buyer_Context: normalizedBuyerContext
+          Buyer_Context: normalizedBuyerContext  // ✅ RELIABILITY: Only 'solo' or 'corporate'
         }]
       };
 
@@ -406,6 +306,7 @@ class ZohoService {
         }
       );
 
+      // ✅ CHECK 2: Validate response before logging success
       if (!zohoUpdateResponse.ok) {
         const error = await zohoUpdateResponse.text();
         console.error('[Zoho Service] ❌ Last touch update failed:', error);
@@ -414,14 +315,18 @@ class ZohoService {
 
       console.log('[Zoho Service] ✅ Last touch fields updated');
 
-      // Send payload to SmartCore
+      // ✅ STEP 2: Send full payload to SmartCore
       console.log('[Zoho Service] 📤 Sending post-call payload to SmartCore...');
       
+      // ✅ FIX 1: Payload compatibility layer
       let smartcorePayload;
       
       if (this.USE_FLAT_PAYLOAD) {
+        // Option A: Flat payload (new architecture - PREFERRED)
         smartcorePayload = postCallPayload;
+        console.log('[Zoho Service] 📦 Using FLAT payload format (new architecture)');
       } else {
+        // Option B: Wrapped payload (legacy compatibility)
         smartcorePayload = {
           lead: {
             id: postCallPayload.lead_id,
@@ -433,16 +338,25 @@ class ZohoService {
           behaviour_score: postCallPayload.behaviour_score_final,
           metadata: postCallPayload
         };
+        console.log('[Zoho Service] 📦 Using WRAPPED payload format (legacy compatibility)');
       }
       
+      // ✅ FIX 4: Log payload size before sending
+      console.log('[Zoho Service] 📦 Final Payload Size:', JSON.stringify(smartcorePayload).length, 'bytes');
+      
+      // ✅ FIX 3: Build headers with SmartCore security key
       const smartcoreHeaders = {
         'Content-Type': 'application/json'
       };
       
+      // Add X-SMARTCORE-KEY if environment variable exists
       if (process.env.SMARTCORE_API_KEY) {
         smartcoreHeaders['X-SMARTCORE-KEY'] = process.env.SMARTCORE_API_KEY;
+      } else {
+        console.warn('[Zoho Service] ⚠️  SMARTCORE_API_KEY missing — request may be rejected');
       }
       
+      // ✅ RELIABILITY FIX 1: SmartCore timeout protection (8 seconds)
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 8000);
       
@@ -464,7 +378,7 @@ class ZohoService {
           console.error('[Zoho Service] ⏱️  SmartCore request timed out (8s limit)');
           return false;
         }
-        throw fetchError;
+        throw fetchError; // Re-throw non-timeout errors
       }
 
       if (!smartcoreResponse.ok) {
@@ -475,7 +389,19 @@ class ZohoService {
 
       const result = await smartcoreResponse.json();
       
+      // ✅ FIX 4: Enhanced SmartCore decision logging
       console.log('[Zoho Service] ✅ SmartCore triggered successfully');
+      console.log('[Zoho Service] 🎯 SmartCore Decision:', {
+        nextAgent: result?.cadence_decision?.next_agent || result?.next_agent || 'N/A',
+        action: result?.agent_action?.message_type || result?.action || 'N/A',
+        stage: result?.stage || 'N/A',
+        taskCreated: result?.task_created || false
+      });
+      
+      // Log full response for debugging (can be disabled in production)
+      if (process.env.NODE_ENV !== 'production') {
+        console.log('[Zoho Service] 📋 Full SmartCore response:', JSON.stringify(result, null, 2));
+      }
 
       return true;
 
@@ -497,7 +423,7 @@ class ZohoService {
     if (c.includes('dubai') || c.includes('uae') || c.includes('united arab emirates')) return 'Dubai';
     if (c.includes('south africa')) return 'South Africa';
     
-    return country;
+    return country; // Return as-is if no match
   }
 
   // ═══════════════════════════════════════════════════════════════

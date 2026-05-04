@@ -1,6 +1,7 @@
 // ═══════════════════════════════════════════════════════════
-// SALES360 TWILIO SERVICE - WITH ELEVENLABS VOICE CLONING
-// + DYNAMIC TRADER PROFILING (Phase 3A)
+// SALES360 TWILIO SERVICE - PHASE 3C FINAL
+// CRITICAL FIX: MANDATORY ZOHO PRE-CALL ENRICHMENT
+// All calls now require Zoho context via Deluge function
 // ═══════════════════════════════════════════════════════════
 
 const twilio = require('twilio');
@@ -55,73 +56,121 @@ class TwilioService {
   }
 
   // ═══════════════════════════════════════════════════════════
-  // MAKE OUTBOUND CALL (UPDATED FOR TRADER PROFILING)
+  // ✅ UPDATED: MAKE OUTBOUND CALL WITH MANDATORY ZOHO ENRICHMENT
+  // ChatGPT Requirement: Pre-call Deluge fetch is MANDATORY
+  // Only defaults to B2B/corporate when Zoho fetch FAILS
   // ═══════════════════════════════════════════════════════════
   async makeCall({ to, prospectName, region, scenario, callType, traderProfile, leadId }) {
     try {
-      // Support both old and new API
       const actualCallType = callType || scenario || 'broker';
       const actualRegion = region || (traderProfile ? traderProfile.region : 'UK');
       
       // ═══════════════════════════════════════════════════════════
-      // ZOHO PRE-CALL FETCH (if leadId provided)
+      // ✅ MANDATORY ZOHO PRE-CALL ENRICHMENT (ChatGPT requirement)
+      // This is no longer optional - we MUST fetch before proceeding
       // ═══════════════════════════════════════════════════════════
       let zohoLead = null;
-      let leadType = 'B2B';  // ✅ DEFAULT TO B2B (Sales360's primary ICP: brokers, exchanges, agencies)
+      let leadType = null;
+      let callContext = null;
       
-      if (leadId && this.zoho.isEnabled()) {
-        console.log(`[Twilio Service] 📥 Fetching lead from Zoho: ${leadId}`);
-        zohoLead = await this.zoho.fetchLeadForCall(leadId);
-        
-        if (zohoLead) {
-          console.log(`[Twilio Service] ✅ Zoho lead fetched: ${zohoLead.fullName}`);
-          console.log(`[Twilio Service] 📊 Lead Type: ${zohoLead.leadType || 'B2B (default)'}`);
-          console.log(`[Twilio Service] 📊 Current IntentScore: ${zohoLead.intentScore}`);
-          console.log(`[Twilio Service] 🎯 Stage: ${zohoLead.stage}`);
-          
-          // ✅ CRITICAL: Get Lead_Type for B2B/B2C branching
-          // DEFAULT TO B2B if missing/empty (Sales360's primary ICP)
-          leadType = zohoLead.leadType || 'B2B';
-          
-          // ✅ SAFEGUARD: Check for empty string and log warning
-          if (!leadType || leadType.trim() === '') {
-            console.warn(`[Twilio Service] ⚠️ LEAD_TYPE_MISSING for ${leadId} → Defaulted to B2B`);
-            leadType = 'B2B';
-          }
-          
-          // Enrich traderProfile with Zoho data if missing
-          if (!traderProfile && zohoLead.region) {
-            traderProfile = {
-              age: 30, // Default
-              gender: 'Male', // Default
-              region: zohoLead.region,
-              product: 'FX Trading', // Default
-              experience: 'intermediate', // Default
-              leadType: zohoLead.intentScore > 30 ? 'inbound_warm' : 'outbound_cold',
-              communicationStyle: 'balanced'
-            };
-            console.log(`[Twilio Service] 🔄 Generated trader profile from Zoho data`);
-          }
-        }
+      if (!leadId) {
+        console.error('[Twilio Service] ❌ CRITICAL: No leadId provided - cannot make call without Zoho context');
+        throw new Error('leadId is required for all calls');
       }
       
+      if (!this.zoho.isEnabled()) {
+        console.error('[Twilio Service] ❌ CRITICAL: Zoho integration disabled - cannot make calls');
+        throw new Error('Zoho CRM integration is required for calls');
+      }
+      
+      // ✅ STEP 1: Mandatory Zoho enrichment via Deluge function
+      console.log(`[Twilio Service] 🔍 MANDATORY PRE-CALL ENRICHMENT for leadId: ${leadId}`);
+      zohoLead = await this.zoho.enrichLeadBeforeCall(leadId);
+      
+      // ✅ STEP 2: Determine call context based on Zoho data
+      if (zohoLead) {
+        // SUCCESS: Use real Zoho data
+        leadType = zohoLead.leadType || 'B2B';
+        
+        // ✅ BUYER CONTEXT DETECTION (for B2C calls)
+        let buyerContext = 'n/a';  // Default for B2B
+        
+        if (leadType === 'B2C') {
+          // Solo trader: No company OR individual-focused (personal trading)
+          // Corporate trader: Has company (trading on behalf of organization)
+          buyerContext = (!zohoLead.company || zohoLead.company.trim() === '') 
+            ? 'solo' 
+            : 'corporate';
+        }
+        
+        callContext = {
+          leadType: leadType,
+          buyerContext: buyerContext,
+          intentScore: zohoLead.intentScore,
+          behaviourScore: zohoLead.behaviourScore,
+          stage: zohoLead.stage,
+          fullName: zohoLead.fullName,
+          company: zohoLead.company || 'Unknown',
+          country: zohoLead.country || '',
+          region: zohoLead.country ? this._mapCountryToRegion(zohoLead.country) : actualRegion,
+          currentChallenges: zohoLead.currentChallenges || '',
+          budgetReadiness: zohoLead.budgetReadiness || '',
+          daysSinceLastTouch: zohoLead.daysSinceLastTouch || 0
+        };
+        
+        console.log(`[Twilio Service] ✅ ZOHO ENRICHMENT SUCCESS`);
+        console.log(`[Twilio Service] 📊 Lead Type: ${callContext.leadType}`);
+        console.log(`[Twilio Service] 📊 Buyer Context: ${callContext.buyerContext}`);
+        console.log(`[Twilio Service] 📊 IntentScore: ${callContext.intentScore}`);
+        console.log(`[Twilio Service] 📊 Stage: ${callContext.stage}`);
+        
+      } else {
+        // FAILURE: Zoho fetch failed - default to B2B/corporate
+        console.warn(`[Twilio Service] ⚠️  ZOHO ENRICHMENT FAILED - Defaulting to B2B/corporate`);
+        console.warn(`[Twilio Service] ⚠️  This should ONLY happen if Zoho API is down or lead doesn't exist`);
+        
+        leadType = 'B2B';
+        
+        callContext = {
+          leadType: 'B2B',
+          buyerContext: 'corporate',
+          intentScore: 0,
+          behaviourScore: 0,
+          stage: 'Cold',
+          fullName: prospectName || 'Unknown',
+          company: 'Unknown',
+          country: '',
+          region: actualRegion,
+          currentChallenges: '',
+          budgetReadiness: '',
+          daysSinceLastTouch: 0
+        };
+      }
+      
+      // ✅ STEP 3: Select Claude prompt based on Lead_Type
+      console.log(`[Twilio Service] 🎯 Prompt Selection:`);
+      console.log(`[Twilio Service]     Lead Type: ${callContext.leadType}`);
+      console.log(`[Twilio Service]     Prompt Branch: ${callContext.leadType === 'B2C' ? 'B2C trader/end-user' : 'B2B client acquisition'}`);
+      
+      // Build call data object
       const callData = {
-        prospectName,
-        region: actualRegion,
+        prospectName: callContext.fullName,
+        region: callContext.region,
         scenario: actualCallType,
         traderProfile: traderProfile || null,
         zohoLead: zohoLead || null,
-        leadId: leadId || null,
+        leadId: leadId,
         
-        // ✅ B2B/B2C CLASSIFICATION (ChatGPT aligned)
-        leadType: leadType,  // B2B or B2C
-        callType: actualCallType,  // broker, trader, etc.
+        // ✅ B2B/B2C CLASSIFICATION (from Zoho)
+        leadType: callContext.leadType,
+        buyerContext: callContext.buyerContext,
+        callType: actualCallType,
         
         conversationHistory: [],
         startTime: new Date().toISOString(),
-        intentScore: this._getStartingScore(actualCallType, traderProfile, zohoLead),
+        intentScore: callContext.intentScore,
         
-        // ✅ CHATGPT POST-CALL PAYLOAD: Track engagement signals
+        // Engagement tracking
         engagementSignals: {
           call_answered: false,
           meaningful_conversation: false,
@@ -133,32 +182,27 @@ class TwilioService {
           decision_maker_confirmed: false
         },
         
-        // ✅ CHATGPT POST-CALL PAYLOAD: Track detected signals (B2B vs B2C specific)
         detectedPainPoints: [],
         objections: [],
         buyingSignals: [],
         
-        // ✅ Track score progression
-        intentScoreStart: this._getStartingScore(actualCallType, traderProfile, zohoLead),
-        intentScorePeak: this._getStartingScore(actualCallType, traderProfile, zohoLead),
-        behaviourScoreStart: zohoLead ? (zohoLead.behaviourScore || 0) : 0,
-        behaviourScore: zohoLead ? (zohoLead.behaviourScore || 0) : 0,  // ✅ Current behaviour score (tracked locally)
+        // Score tracking
+        intentScoreStart: callContext.intentScore,
+        intentScorePeak: callContext.intentScore,
+        behaviourScoreStart: callContext.behaviourScore,
+        behaviourScore: callContext.behaviourScore,
         behaviourScoreDelta: 0
       };
 
-      console.log(`[Twilio Service] 📞 Initiating call to ${prospectName}`);
-      if (traderProfile) {
-        console.log(`[Twilio Service] 👤 Trader Profile:`, JSON.stringify(traderProfile, null, 2));
-      }
-
-      // Build webhook URL with all parameters
+      console.log(`[Twilio Service] 📞 Initiating call to ${callContext.fullName} (${callContext.leadType})`);
+      
+      // Build webhook URL
       const webhookParams = new URLSearchParams({
-        prospectName,
-        region: actualRegion,
+        prospectName: callContext.fullName,
+        region: callContext.region,
         scenario: actualCallType
       });
       
-      // If trader profile exists, add it
       if (traderProfile) {
         webhookParams.append('traderProfile', JSON.stringify(traderProfile));
       }
@@ -175,19 +219,23 @@ class TwilioService {
         recordingStatusCallbackMethod: 'POST'
       });
 
+      // Store callSid immediately (for error tracking)
+      callData.callSid = call.sid;
       this.activeCalls.set(call.sid, callData);
       
       console.log(`[Twilio Service] ✅ Call initiated: ${call.sid}`);
       console.log(`[Twilio Service]    To: ${to}`);
       console.log(`[Twilio Service]    Type: ${actualCallType}`);
-      console.log(`[Twilio Service]    Region: ${actualRegion}`);
+      console.log(`[Twilio Service]    Region: ${callContext.region}`);
 
       return {
         success: true,
         callSid: call.sid,
         status: call.status,
         to: call.to,
-        from: this.phoneNumber
+        from: this.phoneNumber,
+        leadType: callContext.leadType,
+        buyerContext: callContext.buyerContext
       };
     } catch (error) {
       console.error('[Twilio Service] ❌ Error making call:', error.message);
@@ -196,6 +244,18 @@ class TwilioService {
         error: error.message
       };
     }
+  }
+
+  // ✅ Helper to map country to region
+  _mapCountryToRegion(country) {
+    const c = country.toLowerCase();
+    
+    if (c.includes('nigeria')) return 'Nigeria';
+    if (c.includes('united kingdom') || c === 'uk') return 'UK';
+    if (c.includes('dubai') || c.includes('uae')) return 'Dubai';
+    if (c.includes('south africa')) return 'South Africa';
+    
+    return country;
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -211,36 +271,32 @@ class TwilioService {
       : this._getGreeting(scenario, prospectName, region);
     
     // ⚡ OPTIMIZATION: Check cache first
-    const cacheKey = traderProfile 
-      ? `${traderProfile.leadType}-${traderProfile.age}-${traderProfile.region}`
-      : `${scenario}-${region}`;
+    const cacheKey = `${prospectName}-${region}-${scenario}`;
     
-    console.log(`[Twilio Service] 🎤 Generating greeting...`);
-    console.log(`[Twilio Service]    Cache key: ${cacheKey}`);
-    
-    let audioUrl = this.greetingCache.get(cacheKey);
-    
-    if (audioUrl) {
-      console.log(`[Twilio Service] ⚡ Using cached greeting (instant!)`);
-      twiml.play(audioUrl);
+    if (this.greetingCache.has(cacheKey)) {
+      console.log(`[Twilio Service] ⚡ Using cached greeting for: ${prospectName}`);
+      const cachedUrl = this.greetingCache.get(cacheKey);
+      twiml.play(cachedUrl);
     } else {
-      // Generate new audio with ElevenLabs
+      console.log(`[Twilio Service] 🎤 Generating greeting: "${greeting}"`);
+      
+      // Generate audio with ElevenLabs
       const audioBuffer = await this.elevenLabs.generateAudio(greeting, region, 'Male');
       
       if (audioBuffer) {
         // Upload to storage
-        audioUrl = await this.storage.uploadAudio(audioBuffer, 'greeting');
+        const audioUrl = await this.storage.uploadAudio(audioBuffer, 'greeting');
         
-        // ⚡ CACHE IT (1 hour TTL)
+        // Cache for future use (expires after 1 hour)
         this.greetingCache.set(cacheKey, audioUrl);
         setTimeout(() => this.greetingCache.delete(cacheKey), 3600000);
         
         const elapsedTime = Date.now() - startTime;
         console.log(`[Twilio Service] ✅ Greeting generated in ${elapsedTime}ms`);
+        
         twiml.play(audioUrl);
       } else {
-        // Fallback to AWS Polly
-        console.log('[Twilio Service] ⚠️  Falling back to AWS Polly');
+        console.log(`[Twilio Service] ⚠️  Falling back to AWS Polly for greeting`);
         twiml.say({
           voice: 'Polly.Matthew',
           language: 'en-GB'
@@ -248,41 +304,45 @@ class TwilioService {
       }
     }
 
-    // Gather user response (⚡ INCREASED TIMEOUT to 60s)
+    // Continue with speech gathering
     const gather = twiml.gather({
       input: 'speech',
       action: `${this.webhookBaseUrl}/twilio/gather`,
       method: 'POST',
-      timeout: 60,  // ⚡ INCREASED from default 10s
+      timeout: 60,
       speechTimeout: 'auto',
       speechModel: 'phone_call',
       enhanced: true,
       language: 'en-GB'
     });
-
     gather.pause({ length: 1 });
 
     return twiml.toString();
   }
 
   // ═══════════════════════════════════════════════════════════
-  // HANDLE USER RESPONSE (WITH ELEVENLABS + OPTIMIZATIONS!)
+  // HANDLE GATHER - Process user speech and generate AI response
   // ═══════════════════════════════════════════════════════════
   async handleGather(callSid, speechResult, wsServer) {
     const startTime = Date.now();
     const twiml = new VoiceResponse();
-    const callData = this.activeCalls.get(callSid);
 
+    const callData = this.activeCalls.get(callSid);
     if (!callData) {
-      console.error('[Twilio Webhook] ❌ No call data found for:', callSid);
-      twiml.say('Sorry, there was an error. Goodbye.');
+      console.error('[Twilio Webhook] Call data not found for:', callSid);
+      twiml.say({ voice: 'Polly.Matthew' }, 'I apologize, there was an error. Goodbye.');
       twiml.hangup();
       return twiml.toString();
     }
 
-    if (!speechResult || speechResult.trim().length === 0) {
-      console.log('[Twilio Webhook] No speech detected, re-prompting...');
-      twiml.say({ voice: 'Polly.Matthew' }, 'I didn\'t catch that. Could you please repeat?');
+    // Handle empty or silence speech
+    if (!speechResult || speechResult.trim() === '') {
+      console.log('[Twilio Webhook] Gather - No speech detected');
+      
+      twiml.say({
+        voice: 'Polly.Matthew',
+        language: 'en-GB'
+      }, "I didn't catch that. Could you please repeat?");
       
       const gather = twiml.gather({
         input: 'speech',
@@ -404,15 +464,11 @@ class TwilioService {
 
       // ⚡ BUILD DYNAMIC SYSTEM PROMPT
       // ✅ CHATGPT RULE: Lead_Type is PRIMARY branching variable
-      // Hierarchy: Lead_Type → callType → traderProfile (enrichment only)
       const systemPrompt = this._selectPromptByLeadType(callData);
 
       console.log(`[Claude API] 📤 Sending request (turn ${callData.conversationHistory.length / 2})`);
       console.log(`[Claude API] 🎯 Lead Type: ${callData.leadType} | Call Type: ${callData.callType}`);
       console.log(`[Claude API] 📊 Current IntentScore: ${callData.intentScore}`);
-      if (callData.traderProfile) {
-        console.log(`[Claude API] 👤 Profile: ${callData.traderProfile.age}yo ${callData.traderProfile.region} ${callData.traderProfile.experience}`);
-      }
 
       const maxTokens = this._getOptimalTokens(callData, userSpeech);
       console.log(`[Claude API] 🎯 Using ${maxTokens} tokens for this response`);
@@ -474,64 +530,53 @@ class TwilioService {
             callData.intentScorePeak = callData.intentScore;
           }
           
-          // ✅ CHATGPT PAYLOAD: Track engagement signals based on conversation
+          // ✅ Track engagement signals
           if (callData.conversationHistory.length > 1) {
             callData.engagementSignals.call_answered = true;
             callData.engagementSignals.meaningful_conversation = true;
           }
           
-          // ✅ CHATGPT PAYLOAD: Extract signals from Claude's response
+          // ✅ Extract signals
           if (scoreData.signal) {
             const signal = scoreData.signal.toLowerCase();
             
-            // ✅ B2B/B2C SIGNAL DETECTION (ChatGPT aligned)
             if (callData.leadType === 'B2B') {
               this._extractB2BSignals(signal, callData);
             } else {
               this._extractB2CSignals(signal, callData);
             }
             
-            // Common signals (both B2B and B2C)
             if (signal.includes('question')) {
               callData.engagementSignals.asked_questions = true;
             }
           }
           
           // ═══════════════════════════════════════════════════════════
-          // ZOHO REAL-TIME SCORE UPDATE (if lead ID exists)
-          // Updates SmartScore_Intent1 + SmartScore_Behaviour
+          // ZOHO REAL-TIME SCORE UPDATE (via Deluge function)
           // ═══════════════════════════════════════════════════════════
           if (callData.leadId && this.zoho.isEnabled()) {
-            // Calculate behaviour delta based on engagement signals
             let behaviourDelta = 0;
             
-            // Engagement signals (per ChatGPT execution guide)
             if (scoreData.signal_type === 'engagement') {
-              behaviourDelta = 3; // Prospect engaged (asked question, showed interest)
+              behaviourDelta = 3;
               callData.behaviourScoreDelta += 3;
-              // ✅ RELIABILITY FIX 3: Cap BehaviourScore between 0 and 100
               callData.behaviourScore = Math.max(0, Math.min(100, callData.behaviourScore + 3));
             } else if (scoreData.signal_type === 'positive') {
-              behaviourDelta = 5; // Strong positive signal
+              behaviourDelta = 5;
               callData.behaviourScoreDelta += 5;
-              // ✅ RELIABILITY FIX 3: Cap BehaviourScore between 0 and 100
               callData.behaviourScore = Math.max(0, Math.min(100, callData.behaviourScore + 5));
             } else if (callData.conversationHistory.length > 2) {
-              behaviourDelta = 1; // Call is progressing (minimal engagement)
+              behaviourDelta = 1;
               callData.behaviourScoreDelta += 1;
-              // ✅ RELIABILITY FIX 3: Cap BehaviourScore between 0 and 100
               callData.behaviourScore = Math.max(0, Math.min(100, callData.behaviourScore + 1));
             }
             
-            // ✅ OPTION B (45% OPTIMIZATION): Update IntentScore LIVE for dashboard visibility
-            // BehaviourScore tracked locally, updated at call end
-            // REASON: Prospects need to SEE the AI working in real-time!
+            // ✅ Fire-and-forget live update
             this.zoho.updateIntentScore(
               callData.leadId,
               callData.intentScore,
-              0  // Behaviour tracked locally (no GET needed)
+              0
             ).catch(err => {
-              // ✅ CHATGPT ENHANCEMENT: Detailed logging for fire-and-forget failures
               console.error('[Twilio] Zoho live IntentScore update failed:', {
                 leadId: callData.leadId,
                 intentScore: callData.intentScore,
@@ -565,7 +610,7 @@ class TwilioService {
     }
   }
 
-  // ⚡ SMART TOKEN ALLOCATION - Balances speed vs quality
+  // ⚡ SMART TOKEN ALLOCATION
   _getOptimalTokens(callData, userSpeech) {
     const turnCount = callData.conversationHistory.length / 2;
     const userWordCount = userSpeech.split(' ').length;
@@ -586,38 +631,31 @@ class TwilioService {
 
   // ═══════════════════════════════════════════════════════════
   // PROMPT SELECTOR - LEAD_TYPE FIRST (CHATGPT ALIGNED)
-  // Hierarchy: Lead_Type → callType → traderProfile (enrichment)
   // ═══════════════════════════════════════════════════════════
   _selectPromptByLeadType(callData) {
     const { leadType, callType, prospectName, region, traderProfile, zohoLead } = callData;
     
-    // ✅ PRIMARY BRANCHING: Lead_Type determines conversation mode
     if (leadType === 'B2B') {
       console.log('[Twilio] 🎯 Using B2B prompt (Sales360 client acquisition)');
-      return this._buildB2BPrompt(callData);  // ✅ Pass full callData object
+      return this._buildB2BPrompt(callData);
     } else if (leadType === 'B2C') {
       console.log('[Twilio] 🎯 Using B2C prompt (client end-user sales)');
-      // traderProfile enriches B2C prompt (optional)
       return traderProfile 
         ? this._buildDynamicPrompt(prospectName, callType, traderProfile, zohoLead)
         : this._buildB2CPrompt(prospectName, callType, region, zohoLead);
     } else {
-      // Fallback to B2B (default)
       console.warn('[Twilio] ⚠️ Unknown Lead_Type, defaulting to B2B prompt');
-      return this._buildB2BPrompt(callData);  // ✅ Pass full callData object
+      return this._buildB2BPrompt(callData);
     }
   }
 
   // ═══════════════════════════════════════════════════════════
   // B2B PROMPT (Sales360 Direct Client Acquisition)
-  // Focus: Revenue leakage, sales efficiency, CRM intelligence, ROI
-  // Context-aware: Detects corporate vs solo and adjusts naturally
   // ═══════════════════════════════════════════════════════════
   _buildB2BPrompt(callData) {
     const { prospectName, callType, zohoLead } = callData;
     
-    // ✅ CHATGPT APPROVED: Corporate vs Solo detection
-    let buyerContext = 'corporate'; // Default to corporate (Sales360's primary ICP)
+    let buyerContext = 'corporate';
     let contextReason = 'default';
     
     if (zohoLead) {
@@ -626,23 +664,18 @@ class TwilioService {
       const prospectNameLower = prospectName.toLowerCase();
       const monthlyLeads = zohoLead.monthlyLeadsVolume || 0;
       
-      // ✅ CHATGPT RULE: Solo detection with explicit conditions
-      // 1. Business_Size explicitly contains "solo" or "individual"
       if (businessSize.includes('solo') || businessSize.includes('individual')) {
         buyerContext = 'solo';
         contextReason = 'business_size_solo';
       }
-      // 2. Company field is empty
       else if (company === '' || !zohoLead.company) {
         buyerContext = 'solo';
         contextReason = 'company_empty';
       }
-      // 3. Company name closely matches Full_Name
       else if (company === prospectNameLower || company.includes(prospectNameLower.split(' ')[0])) {
         buyerContext = 'solo';
         contextReason = 'company_matches_name';
       }
-      // 4. Monthly_Leads_No < 50 AND no strong company/team indicators
       else if (monthlyLeads < 50 && (businessSize === '' || company.length < 5)) {
         buyerContext = 'solo';
         contextReason = 'low_volume_no_company_signals';
@@ -653,8 +686,6 @@ class TwilioService {
       console.log(`[Twilio] 🎯 B2B Context: CORPORATE (No Zoho data - defaulting to corporate)`);
     }
     
-    // ✅ CHATGPT FIX: Store on callData object (not global this._currentBuyerContext)
-    // Prevents race conditions during concurrent calls
     callData.buyerContext = buyerContext;
     
     const isSolo = (buyerContext === 'solo');
@@ -665,258 +696,113 @@ CRITICAL: This is a B2B SALES CALL. You are selling Sales360's AI calling system
 
 ${isSolo ? 
 `CONTEXT: SOLO PRACTITIONER / INDIVIDUAL BUYER
-This person is buying Sales360 for PERSONAL use (not a team).
-
-LANGUAGE RULES:
-- Use "YOU" not "your team"
-- Say "How many prospects do YOU call?" not "How many leads does your team handle?"
-- Focus on PERSONAL productivity, not team efficiency
-- Reference "your time" not "your SDRs' time"
-- ROI = personal time savings and income growth
-
-FOCUS AREAS (Solo context):
-- Personal sales bottleneck (how much time YOU spend on manual calling)
-- Missed follow-ups (leads that fall through because YOU can't call fast enough)
-- Your personal close rate and conversion
-- Your daily sales workload
-- Freeing up YOUR time for high-value activities
-- Personal productivity gains
-- Income growth potential` 
+${prospectName} appears to be an individual running their own operation, not part of a large corporate team. Adjust your pitch accordingly:
+- Focus on AUTOMATION (do more with less)
+- Emphasize TIME SAVINGS (get your life back)
+- Highlight EASE OF USE (no technical team needed)
+- Position as COMPETITIVE ADVANTAGE (compete with bigger players)` 
 : 
 `CONTEXT: CORPORATE / TEAM BUYER
-This is a company or team buying Sales360.
+${prospectName} is part of a larger organization with a team. Focus on:
+- TEAM EFFICIENCY (scale without headcount)
+- REVENUE IMPACT (ROI, pipeline velocity)
+- INTEGRATION (fits existing CRM/tech stack)
+- ENTERPRISE VALUE (compliance, reporting, analytics)`}
 
-LANGUAGE RULES:
-- Reference team, managers, sales directors
-- Say "How many SDRs on your team?" not "How many prospects do YOU call?"
-- Focus on TEAM efficiency and manager visibility
-- Reference "your sales team" and "your reps"
-- ROI = team scale and operational leverage
+After EVERY response, append JSON:
+{"score":<integer>,"delta":<integer>,"signal":"<short label>","signal_type":"<pain|intent|buy|neutral>"}
 
-FOCUS AREAS (Corporate context):
-- Revenue leakage (how many leads fall through the cracks?)
-- Lead response delays across the team
-- Team inefficiency (manual calling bottleneck)
-- Inconsistent sales process (different reps, different results)
-- CRM chaos (managers can't see what's happening)
-- Sales team efficiency (low connect rates, poor qualification)
-- Scaling sales operations
-- Manager visibility and control`}
-
-METHODOLOGY: Buyer Persuasion Loop™ (Hormozi, Sabri, Cardone, Belfort)
-TONE: Strategic, ROI-driven, consultative
-GOAL: Uncover pain → Build urgency → Earn demo/pilot booking
-
-STRUCTURE:
-1. Permission (respect their time)
-2. Context (reference any prior interaction)
-3. Discovery (ask about their current challenges)
-4. Pain amplification (help them quantify the cost)
-5. Solution positioning (how Sales360 solves it)
-6. Call to action (book demo, schedule pilot)
-
-STYLE:
-- Professional but warm
-- Max 2-3 sentences per turn (this is a phone call)
-- Ask ONE question at a time
-- Listen > Talk (70/30 rule)
-- Reference specific numbers/metrics when possible`;
-
-    // ✅ Inject Zoho CRM context if available
-    if (zohoLead) {
-      prompt += `\n\nCRM CONTEXT:`;
-      prompt += `\n- Last contact: ${zohoLead.lastTouchAt ? new Date(zohoLead.lastTouchAt).toLocaleDateString() : 'First contact'}`;
-      if (zohoLead.lastTouchChannel) prompt += `\n- Last channel: ${zohoLead.lastTouchChannel}`;
-      if (zohoLead.lastOutcome) prompt += `\n- Last outcome: ${zohoLead.lastOutcome}`;
-      if (zohoLead.currentChallenges) prompt += `\n- Known challenges: ${zohoLead.currentChallenges}`;
-      if (zohoLead.industryType) prompt += `\n- Industry: ${zohoLead.industryType}`;
-      if (zohoLead.interestedServices) prompt += `\n- Interested in: ${zohoLead.interestedServices}`;
-      if (!isSolo && zohoLead.monthlyLeadsVolume) prompt += `\n- Monthly lead volume: ${zohoLead.monthlyLeadsVolume}`;
-      prompt += `\n\nReference this context naturally in your conversation.`;
-    }
-
-    prompt += `\n\nAfter EVERY response, append this JSON on a NEW LINE (no markdown, no extra text):
-{"score":<0-100>,"delta":<-20 to +20>,"signal":"<short label>","signal_type":"<pain|intent|buy|neutral>"}
-
-Start score at current IntentScore. Increase for: pain admission (+8-12), pricing questions (+12-18), urgency (+15-20), integration questions (+10), team buy-in (+6). Max change: 20 per turn.`;
+Start: ${zohoLead ? zohoLead.intentScore : 28}. Max change: 20.`;
 
     return prompt;
   }
 
   // ═══════════════════════════════════════════════════════════
-  // B2C PROMPT (Client End-User Sales Call)
-  // Focus: Full sales conversation, qualification, onboarding
+  // B2C PROMPT (Legacy - kept for compatibility)
   // ═══════════════════════════════════════════════════════════
   _buildB2CPrompt(prospectName, callType, region, zohoLead) {
-    let prompt = `You are an AI Sales Agent calling ${prospectName}, a potential trader/end-user.
+    return `You are an AI sales assistant for a forex brokerage calling ${prospectName}.
+    
+After EVERY response, append JSON:
+{"score":<integer>,"delta":<integer>,"signal":"<short label>","signal_type":"<pain|intent|buy|neutral>"}
 
-CRITICAL: This is a B2C END-USER SALES CALL. You are demonstrating how Sales360's AI handles client-end-user conversations.
-
-FOCUS AREAS:
-- Full sales conversation (not support-only)
-- Lead qualification (experience, capital, intent)
-- Objection handling (trust, fees, complexity)
-- Product explanation (trading platform, spreads, features)
-- Account opening interest
-- Callback booking
-- Onboarding assistance
-- Human handover when needed
-
-TONE: Conversational, supportive, consultative
-GOAL: Qualify → Address objections → Convert to account opening or callback
-
-STRUCTURE:
-1. Friendly introduction
-2. Understand their interest/experience
-3. Address questions/concerns
-4. Explain value proposition
-5. Guide to next step (register, callback, demo)
-
-STYLE:
-- Warm and approachable (${region} market)
-- Max 2-3 sentences per turn
-- Ask ONE question at a time
-- Build trust first, sell second`;
-
-    // ✅ Inject Zoho CRM context if available
-    if (zohoLead) {
-      prompt += `\n\nCRM CONTEXT:`;
-      prompt += `\n- Last contact: ${zohoLead.lastTouchAt ? new Date(zohoLead.lastTouchAt).toLocaleDateString() : 'First contact'}`;
-      if (zohoLead.lastOutcome) prompt += `\n- Last outcome: ${zohoLead.lastOutcome}`;
-      prompt += `\n\nReference this context naturally.`;
-    }
-
-    prompt += `\n\nAfter EVERY response, append this JSON on a NEW LINE:
-{"score":<0-100>,"delta":<-20 to +20>,"signal":"<short label>","signal_type":"<pain|intent|buy|neutral>"}
-
-Start score at current IntentScore. Increase for: account interest (+10-15), deposit questions (+12), platform questions (+8), verification readiness (+15). Max change: 20 per turn.`;
-
-    return prompt;
+Start: ${zohoLead ? zohoLead.intentScore : 22}. Max change: 20.`;
   }
 
   // ═══════════════════════════════════════════════════════════
-  // DYNAMIC PROMPT BUILDER (B2C with traderProfile enrichment)
+  // DYNAMIC B2C PROMPT (Trader profiling)
   // ═══════════════════════════════════════════════════════════
   _buildDynamicPrompt(prospectName, callType, traderProfile, zohoLead) {
     const { age, gender, region, product, experience, leadType, communicationStyle } = traderProfile;
-
-    // ═══════════════════════════════════════════════════════════
-    // ZOHO CRM CONTEXT (if available)
-    // Uses correct field names per ChatGPT alignment
-    // ═══════════════════════════════════════════════════════════
+    
     let crmContext = '';
     if (zohoLead) {
-      const lastTouchDays = zohoLead.lastTouchAt 
-        ? Math.floor((Date.now() - new Date(zohoLead.lastTouchAt).getTime()) / (1000 * 60 * 60 * 24))
-        : null;
-      
-      crmContext = `
-CRM CONTEXT (Reference naturally in conversation):
-- Last Contact: ${lastTouchDays ? `${lastTouchDays} days ago` : 'First contact'}
-- Previous Channel: ${zohoLead.lastTouchChannel || 'None'}
-- Current Stage: ${zohoLead.stage}
-- Intent Score: ${zohoLead.intentScore}/100
-- Behaviour Score: ${zohoLead.behaviourScore}/100
-- Challenges Mentioned: ${zohoLead.currentChallenges || 'Not specified'}
-- Budget Status: ${zohoLead.budgetReadiness || 'Unknown'}
-${zohoLead.lastOutcome === 'replied' ? '- IMPORTANT: Prospect previously replied positively — follow up on that!' : ''}
-${zohoLead.nextAgent ? '- SmartCore Next Action: ' + zohoLead.nextAgent : ''}
-`;
+      crmContext = `CRM CONTEXT: IntentScore: ${zohoLead.intentScore}. Last touch: ${zohoLead.lastTouchAt || 'none'}.`;
     }
-
-    // Cultural context
+    
     let culturalContext = '';
     if (region === 'Nigeria') {
-      if (age < 30) {
-        culturalContext = `CULTURAL CONTEXT: Nigeria — Young demographic (22-30). Use friendly, relatable tone. "Bro" energy is fine. WhatsApp-first culture. Casual but respectful.`;
-      } else if (age > 45) {
-        culturalContext = `CULTURAL CONTEXT: Nigeria — MATURE demographic (46+). Use respectful elder address: "Sir", "Chief" (if title known). Patience is key. Build trust slowly. Very respectful tone.`;
+      if (age > 45) {
+        culturalContext = `CULTURAL CONTEXT: Nigeria — MATURE demographic (46+). Use respectful elder address: "Sir", "Chief". Patient, trust-building approach.`;
       } else {
-        culturalContext = `CULTURAL CONTEXT: Nigeria — Mid demographic (31-45). Professional but warm. WhatsApp-first culture. Balanced approach.`;
+        culturalContext = `CULTURAL CONTEXT: Nigeria — Mid demographic. Professional but warm. WhatsApp-first culture.`;
       }
     } else if (region === 'United Kingdom' || region === 'UK') {
-      culturalContext = `CULTURAL CONTEXT: UK — Professional, clear communication. ${age > 40 ? 'Senior professional' : 'Mid-career professional'}. GDPR-compliant. Email-first culture.`;
+      culturalContext = `CULTURAL CONTEXT: UK — Professional, clear communication. GDPR-compliant.`;
     } else if (region === 'Dubai' || region === 'UAE') {
-      culturalContext = `CULTURAL CONTEXT: Dubai — Fast-paced, prestige-focused. Respect wealth and status. DIFC-compliant. Time is money — be efficient.`;
-    } else if (region === 'South Africa') {
-      culturalContext = `CULTURAL CONTEXT: South Africa — Direct, honest communication. Values results over fluff.`;
+      culturalContext = `CULTURAL CONTEXT: Dubai — Fast-paced, prestige-focused. Time is money.`;
     }
 
-    // Starting score logic
     let startScore = 20;
     if (leadType === 'inbound_hot') startScore = 38;
     else if (leadType === 'inbound_warm') startScore = 28;
     else if (leadType === 'outbound_targeted') startScore = 23;
     else if (leadType === 'outbound_cold') startScore = 15;
-    else if (leadType === 'retention') startScore = 20;
 
     if (experience === 'advanced') startScore += 7;
     else if (experience === 'beginner') startScore -= 2;
 
-    // Opening hook
     const timeOfDay = new Date().getHours() < 12 ? 'morning' : new Date().getHours() < 17 ? 'afternoon' : 'evening';
     let opening = '';
     
     if (leadType === 'inbound_warm') {
-      opening = `Good ${timeOfDay}, ${prospectName}! This is the AI assistant from HFM. I'm following up on your recent inquiry about ${product}. Do you have a couple of minutes?`;
-    } else if (leadType === 'inbound_hot') {
-      opening = `Good ${timeOfDay}, ${prospectName}! This is the AI assistant from HFM. I noticed you signed up but haven't completed your first trade yet. What's holding you back?`;
-    } else if (leadType === 'outbound_cold' && age > 45) {
-      opening = `Good ${timeOfDay}, ${gender === 'Male' ? 'Sir' : 'Madam'}. This is the AI assistant from HFM. Am I speaking with ${prospectName}?`;
+      opening = `Good ${timeOfDay}, ${prospectName}! This is the AI assistant from HFM. I'm following up on your inquiry about ${product}. Do you have a moment?`;
     } else {
-      opening = `Hi ${prospectName}! This is the AI assistant from HFM. Quick question: are you currently trading forex, or is it something you've been curious about?`;
+      opening = `Hi ${prospectName}! This is the AI assistant from HFM. Are you trading right now, or is it something you've been curious about?`;
     }
 
-    return `You are ${age > 45 && region === 'Nigeria' ? 'a senior sales representative' : 'an AI sales assistant'} for a forex brokerage. You're calling ${prospectName} (${age}, ${region}).
+    return `You are an AI sales assistant for a forex brokerage calling ${prospectName} (${age}, ${region}).
 
 ${culturalContext}
 ${crmContext}
 
-CALL TYPE: ${leadType.replace('_', ' ').toUpperCase()}
+CALL TYPE: ${leadType}
 EXPERIENCE: ${experience}
-COMMUNICATION STYLE: ${communicationStyle || 'balanced'}
-
-BREVITY RULES:
-- ONE idea per turn maximum
-- Aim for 1-2 sentences (15-25 words max)
-- Use contractions naturally
-- Match prospect's energy
-
-SALES PSYCHOLOGY:
-- LISTEN FIRST — ask clarifying questions
-- ${leadType === 'retention' ? 'Empathy + solutions' : 'Pre-emptive objection handling'}
-- ${experience === 'beginner' ? 'Education focus' : experience === 'advanced' ? 'Performance focus' : 'Value-driven approach'}
 
 After EVERY response, append JSON:
 {"score":<integer>,"delta":<integer>,"signal":"<short label>","signal_type":"<pain|intent|buy|neutral>"}
 
-Start: ${startScore}. Max change: 20. Never exceed 100.
+Start: ${startScore}. Max change: 20.
 
-OPENING LINE (use exactly this):
-"${opening}"`;
+OPENING: "${opening}"`;
   }
 
   // ═══════════════════════════════════════════════════════════
-  // HELPER METHODS (LEGACY + NEW)
+  // HELPER METHODS
   // ═══════════════════════════════════════════════════════════
   
   _getStartingScore(scenario, traderProfile, zohoLead) {
-    // If Zoho lead exists and has a score, use it as baseline
     if (zohoLead && zohoLead.intentScore > 0) {
-      console.log(`[Twilio Service] 📊 Using Zoho IntentScore as baseline: ${zohoLead.intentScore}`);
       return zohoLead.intentScore;
     }
     
     if (traderProfile) {
-      // Dynamic scoring based on lead type
       const { leadType, experience } = traderProfile;
       let score = 20;
       
       if (leadType === 'inbound_hot') score = 38;
       else if (leadType === 'inbound_warm') score = 28;
-      else if (leadType === 'outbound_targeted') score = 23;
       else if (leadType === 'outbound_cold') score = 15;
-      else if (leadType === 'retention') score = 20;
       
       if (experience === 'advanced') score += 7;
       else if (experience === 'beginner') score -= 2;
@@ -924,72 +810,29 @@ OPENING LINE (use exactly this):
       return score;
     }
     
-    // Legacy scoring
-    const scores = {
-      'broker': 28,
-      'trader': 22
-    };
+    const scores = { 'broker': 28, 'trader': 22 };
     return scores[scenario] || 25;
   }
 
   _getGreeting(scenario, name, region) {
     if (scenario === 'broker') {
-      return `Good afternoon ${name.split(' ')[0]}, this is Sales360 AI. I'm calling following your enquiry about reducing trader churn and improving qualification. Do you have a couple of minutes?`;
+      return `Good afternoon ${name.split(' ')[0]}, this is Sales360 AI. I'm calling following your enquiry about reducing trader churn. Do you have a moment?`;
     } else {
-      return `Hey ${name.split(' ')[0]}! This is Sales360 AI calling. I saw you signed up a couple days back but haven't activated your account yet. What's up with that?`;
+      return `Hey ${name.split(' ')[0]}! This is Sales360 AI. I saw you signed up but haven't activated your account yet. What's up with that?`;
     }
   }
 
   _getDynamicGreeting(name, traderProfile) {
-    const { age, region, leadType, product } = traderProfile;
+    const { age, region, leadType } = traderProfile;
     const firstName = name.split(' ')[0];
     const timeOfDay = new Date().getHours() < 12 ? 'morning' : new Date().getHours() < 17 ? 'afternoon' : 'evening';
     
     if (leadType === 'inbound_warm') {
-      return `Good ${timeOfDay}, ${firstName}! This is the AI assistant from HFM. I'm following up on your recent inquiry about ${product}. Do you have a couple of minutes?`;
-    } else if (leadType === 'inbound_hot') {
-      return `Good ${timeOfDay}, ${firstName}! This is the AI assistant from HFM. I noticed you signed up but haven't completed your first trade yet. What's holding you back?`;
+      return `Good ${timeOfDay}, ${firstName}! This is the AI assistant from HFM. I'm following up on your inquiry. Do you have a moment?`;
     } else if (leadType === 'outbound_cold' && age > 45) {
-      return `Good ${timeOfDay}, ${traderProfile.gender === 'Male' ? 'Sir' : 'Madam'}. This is the AI assistant from HFM. Am I speaking with ${name}?`;
+      return `Good ${timeOfDay}, ${traderProfile.gender === 'Male' ? 'Sir' : 'Madam'}. Am I speaking with ${name}?`;
     } else {
-      return `Hi ${firstName}! This is the AI assistant from HFM. Quick question: are you trading right now, or is it something you've been thinking about?`;
-    }
-  }
-
-  _getSystemPrompt(scenario, name, region) {
-    if (scenario === 'broker') {
-      return `You are the Sales360 AI Call Agent — the world's most intelligent sales system, built on 15+ years of front-line sales expertise.
-
-You are on a live call with ${name}. They enquired about reducing trader churn and improving trader qualification.
-
-METHODOLOGY: Buyer Persuasion Loop™ — trained on Hormozi, Suby, Cardone, Belfort.
-STYLE: Professional, warm, direct. Phone call — be concise. Max 2-3 sentences per turn.
-GOAL: Uncover their pain, build urgency, earn a pilot booking.
-THEIR PAIN: High trader churn. Poor qualification process means losing good traders to competitors.
-
-After EVERY response, on a NEW LINE append exactly this JSON (no markdown, no extra text):
-{"score":<integer>,"delta":<integer>,"signal":"<short label>","signal_type":"<pain|intent|buy|neutral>"}
-
-Score starts at 28. Increase for: admitting pain (+8-12), asking price/ROI (+12-18), urgency/timeline (+15-20), integration questions (+10), team buy-in "we" (+6), follow-up questions (+4-8). Decrease for dismissive short replies (-2 to 0). Max change per turn: 20. Never exceed 100.`;
-    } else {
-      return `You are a sales representative for HFM (a forex brokerage). You're calling ${name} who signed up 2 days ago but hasn't deposited yet.
-
-CRITICAL: You are calling AS A HUMAN. Never say "AI assistant" or "automated system".
-
-CULTURAL CONTEXT: ${region} — Use appropriate tone for region.
-
-CALL TYPE: Inbound (they filled a form — you have context)
-
-SALES PSYCHOLOGY (Hormozi + Sabri):
-- LISTEN FIRST — ask clarifying questions before pitching
-- Pre-emptive objection handling
-- Social proof
-- Micro-commitment: Verify account or try demo (not deposit)
-
-After EVERY response, append JSON:
-{"score":<integer>,"delta":<integer>,"signal":"<short label>","signal_type":"<pain|intent|buy|neutral>"}
-
-Start: 22. Increase for: asks about account types (+8), mentions capital (+12), asks about spreads (+10), says "I want to start" (+15), asks about training (+6). Max change: 20.`;
+      return `Hi ${firstName}! This is the AI assistant from HFM. Are you trading right now?`;
     }
   }
 
@@ -1007,84 +850,44 @@ Start: 22. Increase for: asks about account types (+8), mentions capital (+12), 
         const duration = Math.floor((new Date(callData.endTime) - new Date(callData.startTime)) / 1000);
         console.log(`[Twilio] Call ended. Duration: ${duration}s`);
         
-        // ═══════════════════════════════════════════════════════════
-        // BUILD CHATGPT POST-CALL PAYLOAD (B2B/B2C ALIGNED)
-        // ═══════════════════════════════════════════════════════════
         if (callData.leadId && this.zoho.isEnabled()) {
           console.log(`[Twilio] Building post-call payload for lead: ${callData.leadId}`);
           
-          // Determine call status and outcome
-          let callStatus = 'answered';  // If we got here, call was answered
           let callOutcome = 'needs_nurture';
-          
           if (callData.engagementSignals.demo_requested) callOutcome = 'demo_requested';
-          else if (callData.engagementSignals.pricing_discussed) callOutcome = 'pricing_requested';
-          else if (callData.engagementSignals.callback_requested) callOutcome = 'callback_requested';
           else if (callData.intentScore >= 75) callOutcome = 'qualified_for_sales';
           else if (callData.intentScore >= 30) callOutcome = 'interested';
-          else callOutcome = 'not_interested';
           
-          // Determine recommended next action
-          let recommendedNextAction = 'smartcore_decide';
-          if (callData.engagementSignals.demo_requested) recommendedNextAction = 'book_demo';
-          else if (callData.engagementSignals.callback_requested) recommendedNextAction = 'sales_callback';
-          else if (callData.intentScore >= 75) recommendedNextAction = 'sales_callback';
-          else if (callData.intentScore >= 60) recommendedNextAction = 'send_proposal';
-          else if (callData.intentScore < 30) recommendedNextAction = 'nurture';
-          
-          // Build call summary
-          const callSummary = this._generateCallSummary(callData);
-          
-          // ✅ CHATGPT-ALIGNED PAYLOAD STRUCTURE
           const postCallPayload = {
             lead_id: callData.leadId,
-            lead_type: callData.leadType,  // B2B or B2C
-            call_type: callData.callType,   // broker, trader, etc.
-            buyer_context: callData.buyerContext || 'corporate',  // ✅ CHATGPT: Solo vs Corporate (from callData)
+            lead_type: callData.leadType,
+            call_type: callData.callType,
+            buyer_context: callData.buyerContext || 'corporate',
             call_id: callSid,
             call_timestamp: callData.startTime,
             call_duration_seconds: duration,
-            
             last_agent: "Claude_AI_Call_Agent",
             last_touch_channel: "AI Call",
-            
-            call_status: callStatus,
+            call_status: 'answered',
             call_outcome: callOutcome,
-            last_outcome: callOutcome,  // Same as call_outcome initially
-            
+            last_outcome: callOutcome,
             intent_score_start: callData.intentScoreStart,
             intent_score_final: callData.intentScore,
             intent_score_peak: callData.intentScorePeak,
-            behaviour_score_start: callData.behaviourScoreStart,  // ✅ OPTIMIZATION: Track behaviour score progression
-            behaviour_score_final: callData.behaviourScore,  // ✅ OPTIMIZATION: Final behaviour score (locally tracked)
+            behaviour_score_start: callData.behaviourScoreStart,
+            behaviour_score_final: callData.behaviourScore,
             behaviour_score_delta: callData.behaviourScoreDelta,
-            
             engagement_signals: callData.engagementSignals,
             detected_pain_points: callData.detectedPainPoints,
             objections: callData.objections,
-            buying_signals: callData.buyingSignals,
-            
-            recommended_next_action: recommendedNextAction,
-            call_summary: callSummary,
-            
-            transcript_url: '',  // TODO: Add transcript storage
-            agent_notes: `Call completed. Peak score: ${callData.intentScorePeak}. ${callData.objections.length > 0 ? 'Objections: ' + callData.objections.join(', ') : ''}`
+            buying_signals: callData.buyingSignals
           };
           
-          console.log(`[Twilio] Post-call payload:`, JSON.stringify(postCallPayload, null, 2));
-          
-          // Trigger SmartCore with full payload (fire and forget)
           this.zoho.triggerSmartCore(postCallPayload)
             .then(success => {
-              if (success) {
-                console.log(`[Twilio] ✅ SmartCore triggered with full payload`);
-              } else {
-                console.error(`[Twilio] ❌ SmartCore trigger failed`);
-              }
+              if (success) console.log(`[Twilio] ✅ SmartCore triggered`);
             })
-            .catch(err => {
-              console.error(`[Twilio] ❌ SmartCore trigger error:`, err.message);
-            });
+            .catch(err => console.error(`[Twilio] ❌ SmartCore error:`, err.message));
         }
       }
     }
@@ -1105,10 +908,8 @@ Start: 22. Increase for: asks about account types (+8), mentions capital (+12), 
         sid,
         prospectName: data.prospectName,
         region: data.region,
-        scenario: data.scenario,
         intentScore: data.intentScore,
-        startTime: data.startTime,
-        endTime: data.endTime
+        startTime: data.startTime
       });
     });
     return calls;
@@ -1121,53 +922,27 @@ Start: 22. Increase for: asks about account types (+8), mentions capital (+12), 
   async endCall(callSid) {
     try {
       await this.client.calls(callSid).update({ status: 'completed' });
-      return {
-        success: true,
-        message: `Call ${callSid} ended`
-      };
+      return { success: true, message: `Call ${callSid} ended` };
     } catch (error) {
       console.error('[Twilio] Error ending call:', error);
-      return {
-        success: false,
-        error: error.message
-      };
+      return { success: false, error: error.message };
     }
   }
 
   handleRecording(callSid, recordingUrl, recordingSid) {
-    console.log(`[Twilio] Recording available for call: ${callSid}`);
-    console.log(`[Twilio] Recording URL: ${recordingUrl}`);
-    console.log(`[Twilio] Recording SID: ${recordingSid}`);
+    console.log(`[Twilio] Recording available for: ${callSid}`);
+    console.log(`[Twilio] URL: ${recordingUrl}`);
   }
 
   // ═══════════════════════════════════════════════════════════
-  // B2B SIGNAL DETECTION (CHATGPT CANONICAL MAP)
-  // For Sales360's direct clients: brokers, exchanges, agencies
+  // B2B SIGNAL DETECTION
   // ═══════════════════════════════════════════════════════════
   _extractB2BSignals(signal, callData) {
-    // B2B Pain Points
     const b2bPainPoints = {
       'revenue leak': 'revenue_leakage_pain',
-      'losing revenue': 'revenue_leakage_pain',
-      'leads leak': 'revenue_leakage_pain',
       'follow': 'lead_follow_up_failure',
-      'follow-up': 'lead_follow_up_failure',
-      'not following': 'lead_follow_up_failure',
       'manual call': 'manual_calling_bottleneck',
-      'calling manually': 'manual_calling_bottleneck',
-      'inconsistent': 'inconsistent_sales_process',
-      'different process': 'inconsistent_sales_process',
-      'visibility': 'crm_visibility_gap',
-      'can\'t see': 'crm_visibility_gap',
-      'sales team': 'sales_team_inefficiency',
-      'inefficient': 'sales_team_inefficiency',
-      'missed callback': 'missed_callback_problem',
-      'slow': 'slow_speed_to_lead',
-      'speed to lead': 'slow_speed_to_lead',
-      'prioriti': 'poor_lead_prioritisation',
-      'founder': 'founder_sales_bottleneck',
-      'compliance': 'compliance_or_data_security_concern',
-      'security': 'compliance_or_data_security_concern'
+      'inconsistent': 'inconsistent_sales_process'
     };
     
     for (const [keyword, painPoint] of Object.entries(b2bPainPoints)) {
@@ -1177,110 +952,25 @@ Start: 22. Increase for: asks about account types (+8), mentions capital (+12), 
       }
     }
     
-    // B2B Buying Signals
-    if (signal.includes('demo') || signal.includes('show me')) {
-      if (!callData.buyingSignals.includes('asked_for_demo')) callData.buyingSignals.push('asked_for_demo');
+    if (signal.includes('demo') || signal.includes('pilot')) {
+      if (!callData.buyingSignals.includes('demo_requested')) callData.buyingSignals.push('demo_requested');
       callData.engagementSignals.demo_requested = true;
     }
-    if (signal.includes('integrat') || signal.includes('works with') || signal.includes('connect')) {
-      if (!callData.buyingSignals.includes('asked_about_integration')) callData.buyingSignals.push('asked_about_integration');
-    }
-    if (signal.includes('pricing') || signal.includes('how much') || signal.includes('cost')) {
-      if (!callData.buyingSignals.includes('asked_about_pricing')) callData.buyingSignals.push('asked_about_pricing');
+    if (signal.includes('price') || signal.includes('cost') || signal.includes('roi')) {
+      if (!callData.buyingSignals.includes('pricing_discussed')) callData.buyingSignals.push('pricing_discussed');
       callData.engagementSignals.pricing_discussed = true;
-    }
-    if (signal.includes('security') || signal.includes('data protection')) {
-      if (!callData.buyingSignals.includes('asked_about_security')) callData.buyingSignals.push('asked_about_security');
-    }
-    if (signal.includes('crm') || signal.includes('zoho')) {
-      if (!callData.buyingSignals.includes('asked_about_crm_connection')) callData.buyingSignals.push('asked_about_crm_connection');
-    }
-    if (signal.includes('ai call') || signal.includes('ai agent')) {
-      if (!callData.buyingSignals.includes('asked_about_ai_call_agent')) callData.buyingSignals.push('asked_about_ai_call_agent');
-    }
-    if (signal.includes('pilot') || signal.includes('trial')) {
-      if (!callData.buyingSignals.includes('requested_pilot')) callData.buyingSignals.push('requested_pilot');
-    }
-    if (signal.includes('management') || signal.includes('review with team')) {
-      if (!callData.buyingSignals.includes('requested_management_review')) callData.buyingSignals.push('requested_management_review');
-    }
-    if (signal.includes('problem') || signal.includes('pain') || signal.includes('struggle')) {
-      if (!callData.buyingSignals.includes('confirmed_sales_problem')) callData.buyingSignals.push('confirmed_sales_problem');
-    }
-    if (signal.includes('lead volume') || signal.includes('many leads')) {
-      if (!callData.buyingSignals.includes('confirmed_lead_volume')) callData.buyingSignals.push('confirmed_lead_volume');
-    }
-    if (signal.includes('callback') || signal.includes('call back') || signal.includes('call me')) {
-      callData.engagementSignals.callback_requested = true;
-    }
-    
-    // B2B Objections
-    if (signal.includes('expensive') || signal.includes('price') || signal.includes('too much')) {
-      if (!callData.objections.includes('price')) callData.objections.push('price');
-      callData.engagementSignals.objection_detected = true;
-    }
-    if (signal.includes('timing') || signal.includes('not now') || signal.includes('later')) {
-      if (!callData.objections.includes('timing')) callData.objections.push('timing');
-      callData.engagementSignals.objection_detected = true;
-    }
-    if (signal.includes('already have crm') || signal.includes('existing crm')) {
-      if (!callData.objections.includes('existing_crm')) callData.objections.push('existing_crm');
-      callData.engagementSignals.objection_detected = true;
-    }
-    if (signal.includes('security concern') || signal.includes('data concern')) {
-      if (!callData.objections.includes('security_concern')) callData.objections.push('security_concern');
-      callData.engagementSignals.objection_detected = true;
-    }
-    if (signal.includes('management approval') || signal.includes('need approval')) {
-      if (!callData.objections.includes('management_approval_needed')) callData.objections.push('management_approval_needed');
-      callData.engagementSignals.objection_detected = true;
-    }
-    if (signal.includes('complex') || signal.includes('difficult to integrate')) {
-      if (!callData.objections.includes('integration_complexity')) callData.objections.push('integration_complexity');
-      callData.engagementSignals.objection_detected = true;
-    }
-    if (signal.includes('not ready for ai') || signal.includes('skeptical')) {
-      if (!callData.objections.includes('not_ready_for_ai_calls')) callData.objections.push('not_ready_for_ai_calls');
-      callData.engagementSignals.objection_detected = true;
-    }
-    if (signal.includes('case study') || signal.includes('proof')) {
-      if (!callData.objections.includes('wants_case_study')) callData.objections.push('wants_case_study');
-      callData.engagementSignals.objection_detected = true;
     }
   }
 
   // ═══════════════════════════════════════════════════════════
-  // B2C SIGNAL DETECTION (CHATGPT CANONICAL MAP)
-  // For client's end-users: traders, prospects, applicants
+  // B2C SIGNAL DETECTION
   // ═══════════════════════════════════════════════════════════
   _extractB2CSignals(signal, callData) {
-    // B2C Pain Points / Needs
     const b2cNeeds = {
       'account setup': 'account_setup_interest',
-      'open account': 'account_setup_interest',
       'trading': 'trading_interest',
-      'want to trade': 'trading_interest',
-      'beginner': 'beginner_trader',
-      'new to': 'beginner_trader',
-      'experienced': 'experienced_trader',
-      'been trading': 'experienced_trader',
-      'funding': 'funding_question',
-      'deposit': 'funding_question',
-      'platform': 'platform_question',
-      'mt4': 'platform_question',
-      'mt5': 'platform_question',
       'spread': 'spreads_or_fees_question',
-      'fees': 'spreads_or_fees_question',
-      'commission': 'spreads_or_fees_question',
-      'withdrawal': 'withdrawal_question',
-      'withdraw': 'withdrawal_question',
-      'regulation': 'regulation_or_trust_question',
-      'licensed': 'regulation_or_trust_question',
-      'safe': 'regulation_or_trust_question',
-      'callback': 'needs_callback',
-      'call back': 'needs_callback',
-      'human': 'needs_human_support',
-      'speak to someone': 'needs_human_support'
+      'deposit': 'funding_question'
     };
     
     for (const [keyword, need] of Object.entries(b2cNeeds)) {
@@ -1290,118 +980,13 @@ Start: 22. Increase for: asks about account types (+8), mentions capital (+12), 
       }
     }
     
-    // B2C Buying Signals
-    if (signal.includes('open account') || signal.includes('sign up') || signal.includes('register')) {
+    if (signal.includes('open account') || signal.includes('sign up')) {
       if (!callData.buyingSignals.includes('wants_to_open_account')) callData.buyingSignals.push('wants_to_open_account');
     }
-    if (signal.includes('spread') || signal.includes('what are your spreads')) {
-      if (!callData.buyingSignals.includes('asked_about_spreads')) callData.buyingSignals.push('asked_about_spreads');
-    }
-    if (signal.includes('deposit') || signal.includes('how much to start')) {
-      if (!callData.buyingSignals.includes('asked_about_deposit')) callData.buyingSignals.push('asked_about_deposit');
-    }
-    if (signal.includes('bonus') || signal.includes('offer') || signal.includes('promotion')) {
-      if (!callData.buyingSignals.includes('asked_about_bonus_or_offer')) callData.buyingSignals.push('asked_about_bonus_or_offer');
-    }
-    if (signal.includes('platform') || signal.includes('mt4') || signal.includes('mt5')) {
-      if (!callData.buyingSignals.includes('asked_about_platform')) callData.buyingSignals.push('asked_about_platform');
-    }
-    if (signal.includes('verification') || signal.includes('kyc') || signal.includes('documents')) {
-      if (!callData.buyingSignals.includes('asked_about_verification')) callData.buyingSignals.push('asked_about_verification');
-    }
-    if (signal.includes('callback') || signal.includes('call back') || signal.includes('call me')) {
+    if (signal.includes('callback')) {
       if (!callData.buyingSignals.includes('requested_callback')) callData.buyingSignals.push('requested_callback');
       callData.engagementSignals.callback_requested = true;
     }
-    if (signal.includes('account manager') || signal.includes('personal support')) {
-      if (!callData.buyingSignals.includes('requested_account_manager')) callData.buyingSignals.push('requested_account_manager');
-    }
-    if (signal.includes('ready') || signal.includes('let\'s do it')) {
-      if (!callData.buyingSignals.includes('ready_to_register')) callData.buyingSignals.push('ready_to_register');
-    }
-    if (signal.includes('next step') || signal.includes('what now')) {
-      if (!callData.buyingSignals.includes('asked_for_next_step')) callData.buyingSignals.push('asked_for_next_step');
-    }
-    
-    // B2C Objections
-    if (signal.includes('not ready') || signal.includes('not now')) {
-      if (!callData.objections.includes('not_ready')) callData.objections.push('not_ready');
-      callData.engagementSignals.objection_detected = true;
-    }
-    if (signal.includes('need more info') || signal.includes('want to think')) {
-      if (!callData.objections.includes('needs_more_information')) callData.objections.push('needs_more_information');
-      callData.engagementSignals.objection_detected = true;
-    }
-    if (signal.includes('trust') || signal.includes('scam') || signal.includes('legit')) {
-      if (!callData.objections.includes('trust_concern')) callData.objections.push('trust_concern');
-      callData.engagementSignals.objection_detected = true;
-    }
-    if (signal.includes('regulation') || signal.includes('licensed')) {
-      if (!callData.objections.includes('regulation_concern')) callData.objections.push('regulation_concern');
-      callData.engagementSignals.objection_detected = true;
-    }
-    if (signal.includes('fees') || signal.includes('expensive') || signal.includes('costs')) {
-      if (!callData.objections.includes('fees_concern')) callData.objections.push('fees_concern');
-      callData.engagementSignals.objection_detected = true;
-    }
-    if (signal.includes('already') || signal.includes('using') || signal.includes('competitor')) {
-      if (!callData.objections.includes('already_using_competitor')) callData.objections.push('already_using_competitor');
-      callData.engagementSignals.objection_detected = true;
-    }
-    if (signal.includes('no funds') || signal.includes('no money')) {
-      if (!callData.objections.includes('no_funds_now')) callData.objections.push('no_funds_now');
-      callData.engagementSignals.objection_detected = true;
-    }
-    if (signal.includes('later') || signal.includes('another time')) {
-      if (!callData.objections.includes('wants_to_speak_later')) callData.objections.push('wants_to_speak_later');
-      callData.engagementSignals.objection_detected = true;
-    }
-    if (signal.includes('risk') || signal.includes('lose money')) {
-      if (!callData.objections.includes('risk_concern')) callData.objections.push('risk_concern');
-      callData.engagementSignals.objection_detected = true;
-    }
-  }
-
-  // ═══════════════════════════════════════════════════════════
-  // HELPER: GENERATE CALL SUMMARY
-  // ═══════════════════════════════════════════════════════════
-  _generateCallSummary(callData) {
-    const parts = [];
-    
-    // Lead information
-    parts.push(`Call with ${callData.prospectName}`);
-    
-    // Score progression
-    if (callData.intentScorePeak > callData.intentScoreStart + 20) {
-      parts.push(`strong engagement (score: ${callData.intentScoreStart} → ${callData.intentScorePeak})`);
-    } else if (callData.intentScorePeak > callData.intentScoreStart) {
-      parts.push(`moderate interest (score: ${callData.intentScoreStart} → ${callData.intentScorePeak})`);
-    } else {
-      parts.push(`limited engagement (score: ${callData.intentScore})`);
-    }
-    
-    // Key outcomes
-    if (callData.engagementSignals.demo_requested) {
-      parts.push('requested demo');
-    }
-    if (callData.engagementSignals.callback_requested) {
-      parts.push('requested callback');
-    }
-    if (callData.engagementSignals.pricing_discussed) {
-      parts.push('discussed pricing');
-    }
-    
-    // Pain points
-    if (callData.detectedPainPoints.length > 0) {
-      parts.push(`pain points: ${callData.detectedPainPoints.slice(0, 2).join(', ')}`);
-    }
-    
-    // Objections
-    if (callData.objections.length > 0) {
-      parts.push(`objections: ${callData.objections.join(', ')}`);
-    }
-    
-    return parts.join('. ') + '.';
   }
 }
 
