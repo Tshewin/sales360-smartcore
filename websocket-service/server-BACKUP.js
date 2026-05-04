@@ -1,6 +1,6 @@
 /**
  * Sales360 SmartCore Server
- * WebSocket + Twilio Integration + ElevenLabs Voice Cloning + Zoho CRM
+ * WebSocket + Twilio Integration + ElevenLabs Voice Cloning
  */
 
 const express = require('express');
@@ -102,17 +102,9 @@ console.log('[ElevenLabs] ✅ Service initialized');
 console.log(`[ElevenLabs] Default voice (Chuks): ${process.env.ELEVENLABS_DEFAULT_VOICE_ID || 'lJd1hi6nFFWkrcDH9i3a'}`);
 console.log(`[ElevenLabs] Audio storage: ${process.env.AUDIO_STORAGE_PROVIDER || 'datauri'}`);
 
-// ══════════════════════════════════════════════════════════
-// PHASE 3C: ZOHO CRM INTEGRATION
-// ══════════════════════════════════════════════════════════
-
-// Initialize Zoho CRM service
-const ZohoService = require('./zoho-service');
-const zohoService = new ZohoService();
-
-// Initialize Twilio service with ElevenLabs AND Zoho
+// Initialize Twilio service with ElevenLabs
 const TwilioService = require('./twilio-service');
-const twilioService = new TwilioService(elevenLabsService, zohoService);
+const twilioService = new TwilioService(elevenLabsService);
 
 console.log('[Twilio Service] Using ElevenLabs for voice synthesis');
 
@@ -123,87 +115,6 @@ const callRoutes = setupCallRoutes(wsServer, twilioService, elevenLabsService);
 app.use(callRoutes);
 
 console.log('[Setup] Call routes mounted with ElevenLabs voice');
-
-// ══════════════════════════════════════════════════════════
-// ZOHO API ENDPOINTS
-// ══════════════════════════════════════════════════════════
-
-// Test endpoint - verify Zoho connection
-app.get('/api/zoho/test', async (req, res) => {
-  if (!zohoService.isEnabled()) {
-    return res.status(503).json({
-      success: false,
-      zoho_enabled: false,
-      message: 'Zoho CRM integration is disabled (missing credentials)'
-    });
-  }
-
-  try {
-    const token = await zohoService.getAccessToken();
-    res.json({
-      success: true,
-      zoho_enabled: true,
-      token_acquired: !!token,
-      message: 'Zoho CRM integration active'
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-// Fetch lead data (used by dashboard or external systems)
-app.get('/api/zoho/lead/:leadId', async (req, res) => {
-  try {
-    const { leadId } = req.params;
-    const leadData = await zohoService.fetchLeadForCall(leadId);
-    
-    if (!leadData) {
-      return res.status(404).json({
-        success: false,
-        error: 'Lead not found or Zoho integration disabled'
-      });
-    }
-
-    res.json({
-      success: true,
-      lead: leadData
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-// Update IntentScore (can be called externally if needed)
-app.post('/api/zoho/update-score', async (req, res) => {
-  try {
-    const { leadId, score, signal, signalType } = req.body;
-    
-    if (!leadId || score === undefined) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing required fields: leadId, score'
-      });
-    }
-
-    const success = await zohoService.updateIntentScore(leadId, score, signal, signalType);
-    
-    res.json({
-      success,
-      message: success ? 'IntentScore updated in Zoho' : 'Update failed'
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
 
 // ══════════════════════════════════════════════════════════
 
@@ -224,10 +135,6 @@ app.get('/health', (req, res) => {
       voiceId: process.env.ELEVENLABS_DEFAULT_VOICE_ID || 'lJd1hi6nFFWkrcDH9i3a',
       storageProvider: process.env.AUDIO_STORAGE_PROVIDER || 'datauri'
     },
-    zoho: {
-      active: zohoService.isEnabled(),
-      apiDomain: process.env.ZOHO_API_DOMAIN || 'not set'
-    },
     storage: {
       provider: process.env.AUDIO_STORAGE_PROVIDER || 'not set',
       r2AccountId: process.env.R2_ACCOUNT_ID ? 'set' : 'NOT SET',
@@ -242,12 +149,11 @@ app.get('/health', (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     service: 'Sales360 SmartCore',
-    version: '2.2.0-zoho',
+    version: '2.1.0-elevenlabs',
     features: [
       'WebSocket Real-time Sync', 
       'Twilio Phone Integration',
-      'ElevenLabs Voice Cloning (Chuks)',
-      'Zoho CRM Integration'
+      'ElevenLabs Voice Cloning (Chuks)'
     ],
     endpoints: {
       websocket: 'wss://<host>',
@@ -263,11 +169,6 @@ app.get('/', (req, res) => {
         gather: 'POST /twilio/gather',
         status: 'POST /twilio/status',
         recording: 'POST /twilio/recording'
-      },
-      zoho: {
-        test: 'GET /api/zoho/test',
-        fetchLead: 'GET /api/zoho/lead/:leadId',
-        updateScore: 'POST /api/zoho/update-score'
       }
     }
   });
@@ -283,7 +184,6 @@ server.listen(PORT, () => {
   console.log('[SmartCore] Port:', PORT);
   console.log('[SmartCore] WebSocket endpoint ready');
   console.log('[SmartCore] Twilio integration ready');
-  console.log('[SmartCore] Zoho CRM:', zohoService.isEnabled() ? '✅ Connected' : '⚠️  Disabled');
   console.log('[SmartCore] Health check: /health\n');
   
   if (process.env.TWILIO_PHONE_NUMBER) {

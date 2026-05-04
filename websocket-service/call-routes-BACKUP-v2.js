@@ -1,22 +1,33 @@
 // ═══════════════════════════════════════════════════════════
-// SALES360 CALL API ROUTES - WITH REAL AI CONVERSATION
+// SALES360 CALL API ROUTES - WITH REAL AI CONVERSATION + ELEVENLABS
+// + DYNAMIC TRADER PROFILING (Phase 3A)
 // ═══════════════════════════════════════════════════════════
 
 const express = require('express');
-const TwilioService = require('./twilio-service');
 
-function setupCallRoutes(wsServer) {
+function setupCallRoutes(wsServer, twilioService, elevenLabsService) {
   const router = express.Router();
-  const twilioService = new TwilioService();
+
+  // Validate that services were passed correctly
+  if (!twilioService) {
+    console.error('[Call Routes] ERROR: twilioService not provided!');
+    throw new Error('TwilioService is required');
+  }
+
+  if (!elevenLabsService) {
+    console.log('[Call Routes] WARNING: elevenLabsService not provided, voice synthesis may fall back to AWS Polly');
+  } else {
+    console.log('[Call Routes] ✅ ElevenLabs service connected');
+  }
 
   // ═══════════════════════════════════════════════════════════
   // API ROUTES
   // ═══════════════════════════════════════════════════════════
 
-  // Make outbound call
+  // Make outbound call (UPDATED FOR TRADER PROFILING)
   router.post('/api/call/make', async (req, res) => {
     try {
-      const { to, prospectName, region, scenario } = req.body;
+      const { to, prospectName, region, scenario, callType, traderProfile } = req.body;
 
       if (!to || !prospectName) {
         return res.status(400).json({
@@ -25,11 +36,17 @@ function setupCallRoutes(wsServer) {
         });
       }
 
+      console.log('[Call API] /call/make request received');
+      console.log('[Call API] Payload:', JSON.stringify(req.body, null, 2));
+
+      // Support both old and new API formats
       const result = await twilioService.makeCall({
         to,
         prospectName: prospectName || 'there',
-        region: region || 'UK',
-        scenario: scenario || 'broker'
+        region: region || (traderProfile ? traderProfile.region : 'UK'),
+        scenario: scenario || callType || 'broker',
+        callType: callType || scenario || 'broker',
+        traderProfile: traderProfile || null
       });
 
       res.json(result);
@@ -95,20 +112,32 @@ function setupCallRoutes(wsServer) {
   });
 
   // ═══════════════════════════════════════════════════════════
-  // TWILIO WEBHOOKS
+  // TWILIO WEBHOOKS (UPDATED FOR TRADER PROFILING)
   // ═══════════════════════════════════════════════════════════
 
   // Voice webhook - Initial call connection
-  router.post('/twilio/voice', (req, res) => {
+  router.post('/twilio/voice', async (req, res) => {
     try {
-      const { prospectName, region, scenario, CallSid } = req.query;
+      const { prospectName, region, scenario, traderProfile, CallSid } = req.query;
       
       console.log('[Twilio Webhook] Voice - Call connected:', CallSid);
       
-      const twiml = twilioService.generateGreetingTwiML(
+      // Parse trader profile if it exists (passed as JSON string)
+      let parsedTraderProfile = null;
+      if (traderProfile) {
+        try {
+          parsedTraderProfile = JSON.parse(traderProfile);
+          console.log('[Twilio Webhook] Trader profile detected:', parsedTraderProfile);
+        } catch (e) {
+          console.warn('[Twilio Webhook] Could not parse traderProfile:', e.message);
+        }
+      }
+      
+      const twiml = await twilioService.generateGreetingTwiML(
         prospectName || 'there',
         region || 'UK',
-        scenario || 'broker'
+        scenario || 'broker',
+        parsedTraderProfile
       );
       
       res.type('text/xml');
