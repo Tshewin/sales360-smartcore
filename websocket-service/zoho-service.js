@@ -113,10 +113,23 @@ class ZohoService {
         return null;
       }
 
-      // Call Zoho Deluge standalone function (OAuth-enabled)
-      // Use query parameter approach for Deluge functions
-      const functionUrl = `${this.delugePreCallFetch}?auth_type=oauth&lead_id=${leadId}`;
+      // ═══════════════════════════════════════════════════════════
+      // DIAGNOSTIC LOGGING (ChatGPT requirement)
+      // ═══════════════════════════════════════════════════════════
+      const functionUrl = `${this.delugePreCallFetch}?auth_type=oauth&leadId=${leadId}`;
       
+      console.log('[Zoho PreCall] 🔍 DIAGNOSTIC - Calling Deluge function:');
+      console.log('[Zoho PreCall]    Endpoint:', this.delugePreCallFetch.replace(token, '[REDACTED]'));
+      console.log('[Zoho PreCall]    HTTP Method: POST');
+      console.log('[Zoho PreCall]    Parameter Name: leadId (camelCase - matches Deluge signature)');
+      console.log('[Zoho PreCall]    Parameter Value:', leadId);
+      console.log('[Zoho PreCall]    Parameter Format: URL query string');
+      console.log('[Zoho PreCall]    Full URL (auth redacted):', functionUrl.replace(token, '[REDACTED]'));
+      
+      // Call Zoho Deluge standalone function (OAuth-enabled)
+      // CRITICAL: Parameter name MUST match function signature exactly!
+      // Function signature: string standalone.sales360_pre_call_fetch(String leadId)
+      // Therefore: Use "leadId" NOT "lead_id"
       const response = await fetch(functionUrl, {
         method: 'POST',
         headers: {
@@ -125,9 +138,12 @@ class ZohoService {
         }
       });
 
+      console.log('[Zoho PreCall] 📥 Response Status:', response.status, response.statusText);
+
       if (!response.ok) {
-        const error = await response.text();
-        console.error('[Zoho PreCall] ❌ Deluge function call failed:', error);
+        const errorText = await response.text();
+        console.error('[Zoho PreCall] ❌ Response Body:', errorText);
+        console.error('[Zoho PreCall] ❌ Deluge function call failed');
         return null;
       }
 
@@ -314,10 +330,20 @@ class ZohoService {
       
       console.log(`[Zoho Service] 📊 Live IntentScore update: leadId=${leadId}, score=${cappedScore}, behaviourDelta=${behaviourDelta}`);
 
-      // Call Zoho Deluge standalone function (OAuth-enabled)
-      // Use query parameter approach for Deluge functions
-      const functionUrl = `${this.delugeUpdateScore}?auth_type=oauth&lead_id=${leadId}&intent_score=${cappedScore}&behaviour_delta=${behaviourDelta}`;
+      // ═══════════════════════════════════════════════════════════
+      // DIAGNOSTIC LOGGING (ChatGPT requirement)
+      // ═══════════════════════════════════════════════════════════
+      const functionUrl = `${this.delugeUpdateScore}?auth_type=oauth&leadId=${leadId}&intentScore=${cappedScore}&behaviourDelta=${behaviourDelta}`;
       
+      console.log('[Zoho UpdateScore] 🔍 DIAGNOSTIC - Calling Deluge function:');
+      console.log('[Zoho UpdateScore]    Endpoint:', this.delugeUpdateScore);
+      console.log('[Zoho UpdateScore]    HTTP Method: POST');
+      console.log('[Zoho UpdateScore]    Parameters: leadId (camelCase), intentScore, behaviourDelta');
+      console.log('[Zoho UpdateScore]    Values: leadId=', leadId, 'intentScore=', cappedScore, 'behaviourDelta=', behaviourDelta);
+      console.log('[Zoho UpdateScore]    Parameter Format: URL query string');
+      
+      // Call Zoho Deluge standalone function (OAuth-enabled)
+      // CRITICAL: Parameter names MUST match function signature exactly!
       const response = await fetch(functionUrl, {
         method: 'POST',
         headers: {
@@ -326,9 +352,12 @@ class ZohoService {
         }
       });
 
+      console.log('[Zoho UpdateScore] 📥 Response Status:', response.status, response.statusText);
+
       if (!response.ok) {
-        const error = await response.text();
-        console.error('[Zoho Service] ❌ Deluge score update failed:', error);
+        const errorText = await response.text();
+        console.error('[Zoho UpdateScore] ❌ Response Body:', errorText);
+        console.error('[Zoho UpdateScore] ❌ Deluge score update failed');
         return false;
       }
 
