@@ -333,17 +333,18 @@ class ZohoService {
       // ═══════════════════════════════════════════════════════════
       // DIAGNOSTIC LOGGING (ChatGPT requirement)
       // ═══════════════════════════════════════════════════════════
-      const functionUrl = `${this.delugeUpdateScore}?auth_type=oauth&leadId=${leadId}&intentScore=${cappedScore}&behaviourDelta=${behaviourDelta}`;
+      const functionUrl = `${this.delugeUpdateScore}?auth_type=oauth&leadId=${leadId}&score=${cappedScore}&behaviourDelta=${behaviourDelta}`;
       
       console.log('[Zoho UpdateScore] 🔍 DIAGNOSTIC - Calling Deluge function:');
       console.log('[Zoho UpdateScore]    Endpoint:', this.delugeUpdateScore);
       console.log('[Zoho UpdateScore]    HTTP Method: POST');
-      console.log('[Zoho UpdateScore]    Parameters: leadId (camelCase), intentScore, behaviourDelta');
-      console.log('[Zoho UpdateScore]    Values: leadId=', leadId, 'intentScore=', cappedScore, 'behaviourDelta=', behaviourDelta);
+      console.log('[Zoho UpdateScore]    Parameters: leadId, score, behaviourDelta (matching Deluge signature)');
+      console.log('[Zoho UpdateScore]    Values: leadId=', leadId, 'score=', cappedScore, 'behaviourDelta=', behaviourDelta);
       console.log('[Zoho UpdateScore]    Parameter Format: URL query string');
       
       // Call Zoho Deluge standalone function (OAuth-enabled)
       // CRITICAL: Parameter names MUST match function signature exactly!
+      // Function signature: string standalone.sales360_update_intent_score(String leadId, String score, String behaviourDelta)
       const response = await fetch(functionUrl, {
         method: 'POST',
         headers: {
