@@ -113,16 +113,16 @@ class ZohoService {
         return null;
       }
 
-      // Call Zoho Deluge standalone function
-      const response = await fetch(this.delugePreCallFetch, {
+      // Call Zoho Deluge standalone function (OAuth-enabled)
+      // Use query parameter approach for Deluge functions
+      const functionUrl = `${this.delugePreCallFetch}?auth_type=oauth&lead_id=${leadId}`;
+      
+      const response = await fetch(functionUrl, {
         method: 'POST',
         headers: {
           'Authorization': `Zoho-oauthtoken ${token}`,
           'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          arguments: JSON.stringify({ lead_id: leadId })  // ✅ FIX: Use lead_id (underscore)
-        })
+        }
       });
 
       if (!response.ok) {
@@ -314,20 +314,16 @@ class ZohoService {
       
       console.log(`[Zoho Service] 📊 Live IntentScore update: leadId=${leadId}, score=${cappedScore}, behaviourDelta=${behaviourDelta}`);
 
-      // Call Zoho Deluge standalone function
-      const response = await fetch(this.delugeUpdateScore, {
+      // Call Zoho Deluge standalone function (OAuth-enabled)
+      // Use query parameter approach for Deluge functions
+      const functionUrl = `${this.delugeUpdateScore}?auth_type=oauth&lead_id=${leadId}&intent_score=${cappedScore}&behaviour_delta=${behaviourDelta}`;
+      
+      const response = await fetch(functionUrl, {
         method: 'POST',
         headers: {
           'Authorization': `Zoho-oauthtoken ${token}`,
           'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          arguments: JSON.stringify({
-            lead_id: leadId,              // ✅ FIX: Use lead_id (underscore)
-            intent_score: cappedScore,    // ✅ FIX: Use intent_score (underscore)
-            behaviour_delta: behaviourDelta  // ✅ FIX: Use behaviour_delta (underscore)
-          })
-        })
+        }
       });
 
       if (!response.ok) {
