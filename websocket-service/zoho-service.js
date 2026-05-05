@@ -121,7 +121,7 @@ class ZohoService {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          arguments: JSON.stringify({ leadId })
+          arguments: JSON.stringify({ lead_id: leadId })  // ✅ FIX: Use lead_id (underscore)
         })
       });
 
@@ -323,9 +323,9 @@ class ZohoService {
         },
         body: JSON.stringify({
           arguments: JSON.stringify({
-            leadId,
-            score: cappedScore,
-            behaviourDelta
+            lead_id: leadId,              // ✅ FIX: Use lead_id (underscore)
+            intent_score: cappedScore,    // ✅ FIX: Use intent_score (underscore)
+            behaviour_delta: behaviourDelta  // ✅ FIX: Use behaviour_delta (underscore)
           })
         })
       });
