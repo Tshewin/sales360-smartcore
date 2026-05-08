@@ -151,13 +151,41 @@ class ZohoService {
       
       console.log('[Zoho PreCall] 📥 Raw response:', JSON.stringify(data));
 
-      // Extract output from Deluge function response
-      const output = data.details?.output;
+      // ═══════════════════════════════════════════════════════════
+      // ZOHO DELUGE RESPONSE PARSING (ChatGPT requirement)
+      // ═══════════════════════════════════════════════════════════
+      // Step 1: Check outer response code
+      if (data.code !== 'success') {
+        console.error('[Zoho PreCall] ❌ Outer response not successful:', data.code);
+        console.error('[Zoho PreCall] ❌ Message:', data.message);
+        return null;
+      }
+
+      // Step 2: Extract output string from details
+      const outputString = data.details?.output;
       
-      if (!output || !output.success) {
+      if (!outputString) {
+        console.error('[Zoho PreCall] ❌ No output in Deluge response');
+        return null;
+      }
+
+      // Step 3: Parse the JSON string
+      let output;
+      try {
+        output = JSON.parse(outputString);
+      } catch (parseError) {
+        console.error('[Zoho PreCall] ❌ Failed to parse output JSON:', parseError.message);
+        console.error('[Zoho PreCall] ❌ Raw output:', outputString);
+        return null;
+      }
+      
+      // Step 4: Check inner success flag
+      if (!output || output.success !== true) {
         console.error('[Zoho PreCall] ❌ Deluge function returned error:', output?.error || 'Unknown error');
         return null;
       }
+
+      console.log('[Zoho PreCall] ✅ Deluge function succeeded');
 
       // Parse lead data from Deluge response
       const leadData = {
@@ -363,14 +391,43 @@ class ZohoService {
       }
 
       const data = await response.json();
-      const output = data.details?.output;
 
-      if (!output || !output.success) {
-        console.error('[Zoho Service] ❌ Deluge function returned error:', output?.error || 'Unknown error');
+      // ═══════════════════════════════════════════════════════════
+      // ZOHO DELUGE RESPONSE PARSING (ChatGPT requirement)
+      // ═══════════════════════════════════════════════════════════
+      // Step 1: Check outer response code
+      if (data.code !== 'success') {
+        console.error('[Zoho UpdateScore] ❌ Outer response not successful:', data.code);
+        console.error('[Zoho UpdateScore] ❌ Message:', data.message);
         return false;
       }
 
-      console.log('[Zoho Service] ✅ IntentScore updated via Deluge:', output.intent_score);
+      // Step 2: Extract output string from details
+      const outputString = data.details?.output;
+      
+      if (!outputString) {
+        console.error('[Zoho UpdateScore] ❌ No output in Deluge response');
+        return false;
+      }
+
+      // Step 3: Parse the JSON string
+      let output;
+      try {
+        output = JSON.parse(outputString);
+      } catch (parseError) {
+        console.error('[Zoho UpdateScore] ❌ Failed to parse output JSON:', parseError.message);
+        console.error('[Zoho UpdateScore] ❌ Raw output:', outputString);
+        return false;
+      }
+
+      // Step 4: Check inner success flag
+      if (!output || output.success !== true) {
+        console.error('[Zoho UpdateScore] ❌ Deluge function returned error:', output?.error || 'Unknown error');
+        return false;
+      }
+
+      console.log('[Zoho UpdateScore] ✅ IntentScore updated successfully');
+      console.log('[Zoho UpdateScore] ✅ Final score:', output.intent_score);
 
       return true;
 
