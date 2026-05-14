@@ -180,6 +180,7 @@ function setupCallRoutes(wsServer, twilioService, elevenLabsService) {
           input: 'speech',
           action: `${process.env.WEBHOOK_BASE_URL}/twilio/gather`,
           method: 'POST',
+          timeout: 60,  // ← FIX: Wait up to 60 seconds for AI response (Claude + ElevenLabs can take 15-20s)
           speechTimeout: 'auto',
           speechModel: 'phone_call',
           enhanced: true,
