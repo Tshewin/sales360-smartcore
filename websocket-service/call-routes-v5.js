@@ -180,6 +180,7 @@ function setupCallRoutes(wsServer, twilioService, elevenLabsService) {
           input: 'speech',
           action: `${process.env.WEBHOOK_BASE_URL}/twilio/gather`,
           method: 'POST',
+          timeout: 60,  // ← FIX: Wait up to 60 seconds for AI response (Claude + ElevenLabs can take 15-20s)
           speechTimeout: 'auto',
           speechModel: 'phone_call',
           enhanced: true,
@@ -203,80 +204,6 @@ function setupCallRoutes(wsServer, twilioService, elevenLabsService) {
     } catch (error) {
       console.error('[Twilio Webhook] Error in /twilio/gather:', error);
       res.status(500).send('Error processing gather webhook');
-    }
-  });
-
-  // ⚡ ASYNC PATTERN: Wait endpoint - polls for response readiness
-  router.post('/twilio/wait/:callSid', async (req, res) => {
-    try {
-      const { callSid } = req.params;
-      const VoiceResponse = require('twilio').twiml.VoiceResponse;
-      const twiml = new VoiceResponse();
-      
-      // Check if response is ready
-      const pendingResponse = twilioService.pendingResponses.get(callSid);
-      
-      if (pendingResponse && pendingResponse.success && pendingResponse.audioUrl) {
-        // ✅ Response ready! Play it
-        console.log(`[Twilio Wait] ✅ Response ready for ${callSid}`);
-        
-        twiml.play(pendingResponse.audioUrl);
-        
-        // Continue gathering
-        const gather = twiml.gather({
-          input: 'speech',
-          action: `${process.env.WEBHOOK_BASE_URL}/twilio/gather`,
-          method: 'POST',
-          timeout: 60,
-          speechTimeout: 'auto',
-          speechModel: 'phone_call',
-          enhanced: true,
-          language: 'en-GB'
-        });
-        gather.pause({ length: 1 });
-        
-        // Clean up
-        twilioService.pendingResponses.delete(callSid);
-        
-      } else if (pendingResponse && !pendingResponse.success) {
-        // ❌ Error occurred
-        console.error(`[Twilio Wait] ❌ Error for ${callSid}:`, pendingResponse.error);
-        twiml.say("I apologize, I'm having trouble right now. Let me try again.");
-        
-        const gather = twiml.gather({
-          input: 'speech',
-          action: `${process.env.WEBHOOK_BASE_URL}/twilio/gather`,
-          method: 'POST',
-          timeout: 60,
-          speechTimeout: 'auto',
-          speechModel: 'phone_call',
-          enhanced: true,
-          language: 'en-GB'
-        });
-        gather.pause({ length: 1 });
-        
-        twilioService.pendingResponses.delete(callSid);
-        
-      } else {
-        // ⏳ Still generating - keep waiting
-        console.log(`[Twilio Wait] ⏳ Still generating for ${callSid}...`);
-        twiml.pause({ length: 2 }); // Wait 2 seconds
-        twiml.redirect({
-          method: 'POST'
-        }, `${process.env.WEBHOOK_BASE_URL}/twilio/wait/${callSid}`);
-      }
-      
-      res.type('text/xml');
-      res.send(twiml.toString());
-      
-    } catch (error) {
-      console.error('[Twilio Wait] Error:', error);
-      const VoiceResponse = require('twilio').twiml.VoiceResponse;
-      const twiml = new VoiceResponse();
-      twiml.say("I apologize, there was an error. Please try again.");
-      twiml.hangup();
-      res.type('text/xml');
-      res.send(twiml.toString());
     }
   });
 

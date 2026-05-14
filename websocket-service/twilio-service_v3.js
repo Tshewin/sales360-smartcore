@@ -25,9 +25,6 @@ class TwilioService {
     this.client = twilio(this.accountSid, this.authToken);
     this.activeCalls = new Map();
     
-    // ⚡ ASYNC PATTERN: Track responses being generated in background
-    this.pendingResponses = new Map();
-    
     // ⚡ OPTIMIZATION: Greeting cache (avoid regenerating same audio)
     this.greetingCache = new Map();
     
@@ -324,89 +321,10 @@ class TwilioService {
   }
 
   // ═══════════════════════════════════════════════════════════
-  // ASYNC PATTERN: Generate response in background (NO WAITING!)
-  // ═══════════════════════════════════════════════════════════
-  async generateResponseAsync(callSid, speechResult, wsServer) {
-    const startTime = Date.now();
-    
-    try {
-      console.log(`[Twilio Async] 🔄 Generating response for ${callSid}...`);
-      
-      const callData = this.activeCalls.get(callSid);
-      if (!callData) {
-        throw new Error('Call data not found');
-      }
-
-      // Get AI response from Claude
-      const aiResponse = await this._getClaudeResponse(callData, speechResult);
-      
-      if (!aiResponse) {
-        throw new Error('No AI response received');
-      }
-
-      console.log(`[Twilio Async] 🤖 AI response: ${aiResponse.text.substring(0, 80)}...`);
-
-      // Broadcast to dashboard
-      if (wsServer && aiResponse.score !== undefined) {
-        const signals = [];
-        if (aiResponse.signal) {
-          signals.push({
-            type: aiResponse.signalType || 'neutral',
-            label: aiResponse.signal,
-            delta: aiResponse.delta || 0
-          });
-        }
-
-        wsServer.broadcast({
-          type: 'callUpdate',
-          callSid,
-          intentScore: aiResponse.score,
-          signals,
-          transcript: {
-            role: 'assistant',
-            text: aiResponse.text
-          }
-        });
-      }
-
-      // Generate audio with ElevenLabs
-      const audioBuffer = await this.elevenLabs.generateAudio(
-        aiResponse.text, 
-        callData.region, 
-        'Male'
-      );
-
-      if (!audioBuffer) {
-        throw new Error('Audio generation failed');
-      }
-
-      const audioUrl = await this.storage.uploadAudio(audioBuffer, 'response');
-      const elapsedTime = Date.now() - startTime;
-      console.log(`[Twilio Async] ✅ Response ready in ${elapsedTime}ms`);
-      
-      // Store the ready response
-      this.pendingResponses.set(callSid, {
-        audioUrl,
-        text: aiResponse.text,
-        score: aiResponse.score,
-        timestamp: Date.now(),
-        success: true
-      });
-      
-    } catch (error) {
-      console.error(`[Twilio Async] ❌ Error generating response:`, error);
-      this.pendingResponses.set(callSid, {
-        error: error.message,
-        timestamp: Date.now(),
-        success: false
-      });
-    }
-  }
-
-  // ═══════════════════════════════════════════════════════════
   // HANDLE GATHER - Process user speech and generate AI response
   // ═══════════════════════════════════════════════════════════
   async handleGather(callSid, speechResult, wsServer) {
+    const startTime = Date.now();
     const twiml = new VoiceResponse();
 
     const callData = this.activeCalls.get(callSid);
@@ -443,16 +361,91 @@ class TwilioService {
 
     console.log(`[Twilio Webhook] 🎤 User said: ${speechResult}`);
 
-    // ⚡ ASYNC PATTERN: Start generating response in BACKGROUND (don't await!)
-    this.generateResponseAsync(callSid, speechResult, wsServer);
-    
-    // Return IMMEDIATELY with redirect to wait endpoint
-    console.log(`[Twilio Webhook] ⚡ Redirecting to wait endpoint (async mode)`);
-    twiml.redirect({
-      method: 'POST'
-    }, `${this.webhookBaseUrl}/twilio/wait/${callSid}`);
+    // ⚡ OPTIMIZATION: Add "thinking" indicator
+    twiml.pause({ length: 0.5 });
 
-    return twiml.toString(); // Returns in <500ms!
+    // Get AI response from Claude (with dynamic profiling)
+    const aiResponse = await this._getClaudeResponse(callData, speechResult);
+    
+    if (!aiResponse) {
+      console.error('[Twilio Webhook] No AI response - using fallback');
+      twiml.say({ voice: 'Polly.Matthew' }, 'I apologize, I\'m having trouble processing that. Let me try again.');
+      
+      const gather = twiml.gather({
+        input: 'speech',
+        action: `${this.webhookBaseUrl}/twilio/gather`,
+        method: 'POST',
+        timeout: 60,
+        speechTimeout: 'auto',
+        speechModel: 'phone_call',
+        enhanced: true,
+        language: 'en-GB'
+      });
+      gather.pause({ length: 1 });
+      
+      return twiml.toString();
+    }
+
+    console.log(`[Twilio Webhook] 🤖 AI response: ${aiResponse.text.substring(0, 80)}...`);
+
+    // 🔥 BROADCAST INTENTSCORE TO DASHBOARD
+    if (wsServer && aiResponse.score !== undefined) {
+      const signals = [];
+      if (aiResponse.signal) {
+        signals.push({
+          type: aiResponse.signalType || 'neutral',
+          label: aiResponse.signal,
+          delta: aiResponse.delta || 0
+        });
+      }
+
+      wsServer.broadcast({
+        type: 'callUpdate',
+        callSid,
+        intentScore: aiResponse.score,
+        signals,
+        transcript: {
+          role: 'assistant',
+          text: aiResponse.text
+        }
+      });
+    }
+
+    // Generate audio with ElevenLabs
+    const audioBuffer = await this.elevenLabs.generateAudio(
+      aiResponse.text, 
+      callData.region, 
+      'Male'
+    );
+
+    if (audioBuffer) {
+      const audioUrl = await this.storage.uploadAudio(audioBuffer, 'response');
+      const elapsedTime = Date.now() - startTime;
+      console.log(`[Twilio Service] ✅ Full response generated in ${elapsedTime}ms`);
+      
+      twiml.play(audioUrl);
+    } else {
+      console.log('[Twilio Service] ⚠️  Falling back to AWS Polly for response');
+      twiml.say({
+        voice: 'Polly.Matthew',
+        language: 'en-GB'
+      }, aiResponse.text);
+    }
+
+    // Continue gathering
+    const gather = twiml.gather({
+      input: 'speech',
+      action: `${this.webhookBaseUrl}/twilio/gather`,
+      method: 'POST',
+      timeout: 60,
+      speechTimeout: 'auto',
+      speechModel: 'phone_call',
+      enhanced: true,
+      language: 'en-GB'
+    });
+    gather.pause({ length: 1 });
+
+    return twiml.toString();
   }
 
   // ═══════════════════════════════════════════════════════════
