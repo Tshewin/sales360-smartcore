@@ -10,6 +10,9 @@ const ElevenLabsService = require('./elevenlabs-dynamic-service');
 const StorageService = require('./storage-service');
 const ZohoService = require('./zoho-service');
 
+// ⚡ PRODUCTION: Hybrid Sales Prompt (Sabri + Hormozi + Cardone + Patel + Chuks)
+const { buildB2CSalesPrompt, validateSalesResponse } = require('./B2C-SALES-PROMPT-HYBRID-V2');
+
 class TwilioService {
   constructor(elevenLabsService = null, zohoService = null) {
     this.accountSid = process.env.TWILIO_ACCOUNT_SID;
@@ -524,6 +527,21 @@ class TwilioService {
           }
         }
 
+        // ⚡ VALIDATE RESPONSE (B2C only - enforce 25-word limit + questions)
+        if (callData.leadType === 'B2C') {
+          const validation = validateSalesResponse(aiText);
+          
+          if (!validation.valid) {
+            console.warn(`[Claude API] ⚠️  Response validation: ${validation.message}`);
+            console.warn(`[Claude API] ⚠️  Word count: ${validation.wordCount} (max 25)`);
+            console.warn(`[Claude API] ⚠️  Ends with question: ${validation.endsWithQuestion}`);
+            console.warn(`[Claude API] ⚠️  Response: "${aiText}"`);
+            // Still use the response, but flag for monitoring
+          } else {
+            console.log(`[Claude API] ✅ Response validated: ${validation.wordCount} words, ends with question`);
+          }
+        }
+
         callData.conversationHistory.push({
           role: 'assistant',
           content: fullText
@@ -623,6 +641,15 @@ class TwilioService {
     const userWordCount = userSpeech.split(' ').length;
     const intentScore = callData.intentScore || 0;
 
+    // ⚡ B2C: ENFORCE BREVITY (25-word limit = ~35 tokens max)
+    if (callData.leadType === 'B2C') {
+      if (intentScore < 30) return 80;   // Cold: Very short questions
+      if (intentScore < 60) return 100;  // Warm: Short + authority
+      if (intentScore < 75) return 120;  // Hot: Urgency
+      return 100;  // SQL: Direct close
+    }
+
+    // B2B: Allow longer responses (existing logic)
     if (turnCount <= 1) return 180;
     if (userWordCount > 30) return 350;
     if (intentScore >= 60) return 300;
@@ -646,10 +673,31 @@ class TwilioService {
       console.log('[Twilio] 🎯 Using B2B prompt (Sales360 client acquisition)');
       return this._buildB2BPrompt(callData);
     } else if (leadType === 'B2C') {
-      console.log('[Twilio] 🎯 Using B2C prompt (client end-user sales)');
-      return traderProfile 
-        ? this._buildDynamicPrompt(prospectName, callType, traderProfile, zohoLead)
-        : this._buildB2CPrompt(prospectName, callType, region, zohoLead);
+      // ⚡ PRODUCTION: Use Hybrid Sales Prompt
+      console.log('[Twilio] 🎯 Using B2C HYBRID SALES PROMPT (Sabri+Hormozi+Cardone+Patel+Chuks)');
+      
+      // Build Zoho data object for prompt injection
+      const zohoData = {
+        full_name: prospectName,
+        experience: traderProfile?.experience || 'Beginner',
+        stage: zohoLead?.stage || 'Cold',
+        intent_score: callData.intentScore || 0,
+        last_touch_channel: zohoLead?.lastTouchChannel || 'Email',
+        days_since_last_touch: zohoLead?.daysSinceLastTouch || 0,
+        current_challenges: zohoLead?.currentChallenges || '',
+        interested_services: zohoLead?.interestedServices || []
+      };
+      
+      // Log pain point focus if available
+      if (zohoData.current_challenges) {
+        console.log('[Twilio] 🎯 Pain point focus:', zohoData.current_challenges);
+      }
+      
+      return buildB2CSalesPrompt(zohoData, {
+        conversationHistory: callData.conversationHistory,
+        currentTurn: callData.conversationHistory.length,
+        leadType: 'B2C'
+      });
     } else {
       console.warn('[Twilio] ⚠️ Unknown Lead_Type, defaulting to B2B prompt');
       return this._buildB2BPrompt(callData);
