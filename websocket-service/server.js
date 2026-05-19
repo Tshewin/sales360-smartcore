@@ -8,12 +8,16 @@ const http = require('http');
 const WebSocket = require('ws');
 const cors = require('cors');
 
+// At the top with other requires
+const { setupAudioRoutes, startCleanupTask } = require('./audio-routes-FALLBACK');
+
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-// At the top with other requires
-const { setupAudioRoutes, startCleanupTask } = require('./audio-routes-FALLBACK');
+app.use(cors());
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 // After initializing storageService
 const storageService = new StorageService();
@@ -27,10 +31,6 @@ setupAudioRoutes(app, storageService);
 // Start cleanup task
 startCleanupTask(storageService);
 
-
-app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
 
 const API_KEY = process.env.WEBSOCKET_API_KEY || '348bfe2c06cfb611c6240a83b8b850f4683908d2eb05d450b01b5a760c3c3dee';
 const clients = new Set();
