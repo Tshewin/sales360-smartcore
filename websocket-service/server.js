@@ -12,6 +12,19 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
+// At the top with other requires
+const { setupAudioRoutes, startCleanupTask } = require('./audio-routes-FALLBACK');
+
+// After initializing storageService
+const storageService = new StorageService();
+
+// Mount audio routes
+setupAudioRoutes(app, storageService);
+
+// Start cleanup task
+startCleanupTask(storageService);
+
+
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
