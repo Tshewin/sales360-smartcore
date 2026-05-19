@@ -18,6 +18,9 @@ const { setupAudioRoutes, startCleanupTask } = require('./audio-routes-FALLBACK'
 // After initializing storageService
 const storageService = new StorageService();
 
+// Import StorageService (THIS WAS MISSING!)
+const StorageService = require('./storage-service');
+
 // Mount audio routes
 setupAudioRoutes(app, storageService);
 
