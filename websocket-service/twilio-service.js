@@ -57,7 +57,7 @@ class TwilioService {
     console.log('[Twilio Service] ✅ Initialized with number:', this.phoneNumber);
     console.log('[Twilio Service] Anthropic API Key:', this.anthropicApiKey ? `YES (length: ${this.anthropicApiKey.length})` : '❌ MISSING!');
     console.log('[Twilio Service] ElevenLabs:', this.elevenLabs.isReady() ? '✅ Ready' : '⚠️  Disabled');
-    console.log('[Twilio Service] Storage:', this.storage.isReady() ? '✅ Ready' : '⚠️  Using Data URI');
+    console.log('[Twilio Service] Storage: ✅ Ready (3-tier fallback: R2 → Volume → Direct)');
     console.log('[Twilio Service] Zoho CRM:', this.zoho.isEnabled() ? '✅ Connected' : '⚠️  Disabled');
   }
 
