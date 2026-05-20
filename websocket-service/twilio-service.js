@@ -291,7 +291,10 @@ class TwilioService {
       
       if (audioBuffer) {
         // Upload to storage
-        const audioUrl = await this.storage.uploadAudio(audioBuffer, 'greeting');
+        const storageResult = await this.storage.uploadAudio(audioBuffer, 'greeting');
+        
+        // ✅ NEW STORAGE SERVICE: Extract URL from response object
+        const audioUrl = storageResult.url || storageResult;
         
         // Cache for future use (expires after 1 hour)
         this.greetingCache.set(cacheKey, audioUrl);
@@ -299,6 +302,7 @@ class TwilioService {
         
         const elapsedTime = Date.now() - startTime;
         console.log(`[Twilio Service] ✅ Greeting generated in ${elapsedTime}ms`);
+        console.log(`[Twilio Service] 🎵 Audio URL: ${audioUrl}`);
         
         twiml.play(audioUrl);
       } else {
@@ -383,9 +387,13 @@ class TwilioService {
         throw new Error('Audio generation failed');
       }
 
-      const audioUrl = await this.storage.uploadAudio(audioBuffer, 'response');
+      // ✅ NEW STORAGE SERVICE: Extract URL from response object
+      const storageResult = await this.storage.uploadAudio(audioBuffer, 'response');
+      const audioUrl = storageResult.url || storageResult;
+      
       const elapsedTime = Date.now() - startTime;
       console.log(`[Twilio Async] ✅ Response ready in ${elapsedTime}ms`);
+      console.log(`[Twilio Async] 🎵 Audio URL: ${audioUrl}`);
       
       // Store the ready response
       this.pendingResponses.set(callSid, {
