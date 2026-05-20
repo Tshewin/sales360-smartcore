@@ -219,10 +219,9 @@ function setupCallRoutes(wsServer, twilioService, elevenLabsService) {
       if (pendingResponse && pendingResponse.success && pendingResponse.audioUrl) {
         // ✅ Response ready! Play it
         console.log(`[Twilio Wait] ✅ Response ready for ${callSid}`);
+        console.log(`[Twilio Wait] 📤 Returning audio URL: ${pendingResponse.audioUrl}`);
         
-        twiml.play(pendingResponse.audioUrl);
-        
-        // Continue gathering
+        // ✅ FIX: Create gather FIRST, then add play and pause INSIDE it
         const gather = twiml.gather({
           input: 'speech',
           action: `${process.env.WEBHOOK_BASE_URL}/twilio/gather`,
@@ -233,7 +232,15 @@ function setupCallRoutes(wsServer, twilioService, elevenLabsService) {
           enhanced: true,
           language: 'en-GB'
         });
+        
+        // ✅ FIX: Play audio INSIDE the gather (so call doesn't end)
+        gather.play(pendingResponse.audioUrl);
         gather.pause({ length: 1 });
+        
+        // ✅ FIX: Add fallback if no speech detected (prevents hangup)
+        twiml.redirect({
+          method: 'POST'
+        }, `${process.env.WEBHOOK_BASE_URL}/twilio/gather`);
         
         // Clean up
         twilioService.pendingResponses.delete(callSid);
