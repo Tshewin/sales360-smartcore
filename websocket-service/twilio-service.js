@@ -10,8 +10,9 @@ const ElevenLabsService = require('./elevenlabs-dynamic-service');
 const StorageService = require('./storage-service');
 const ZohoService = require('./zoho-service');
 
-// ⚡ PRODUCTION: Hybrid Sales Prompt (Sabri + Hormozi + Cardone + Patel + Chuks)
-const { buildB2CSalesPrompt, validateSalesResponse } = require('./B2C-SALES-PROMPT-HYBRID-V2');
+// ✅ CHUKS METHODOLOGY V2: Regional Calibration + Conversational Sales
+const ChuksMethodology = require('./CHUKS-METHODOLOGY-V2');
+const RegionalCalibration = require('./REGIONAL-CALIBRATION');
 
 class TwilioService {
   constructor(elevenLabsService = null, zohoService = null) {
@@ -490,6 +491,13 @@ class TwilioService {
 
       const maxTokens = this._getOptimalTokens(callData, userSpeech);
       console.log(`[Claude API] 🎯 Using ${maxTokens} tokens for this response`);
+      
+      // ✅ SPEED OPTIMIZATION: Use Haiku for B2C (4x faster), Sonnet for B2B
+      const modelToUse = callData.leadType === 'B2C' 
+        ? 'claude-haiku-4-20250516'       // Fast for conversational sales
+        : 'claude-sonnet-4-20250514';     // Smart for complex B2B
+      
+      console.log(`[Claude API] 📊 Model: ${modelToUse}`);
 
       const response = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
@@ -499,7 +507,7 @@ class TwilioService {
           'anthropic-version': '2023-06-01'
         },
         body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
+          model: modelToUse,
           max_tokens: maxTokens,
           system: systemPrompt,
           messages: callData.conversationHistory
@@ -535,15 +543,13 @@ class TwilioService {
           }
         }
 
-        // ⚡ VALIDATE RESPONSE (B2C only - enforce 25-word limit + questions)
+        // ✅ VALIDATE RESPONSE (B2C only - Chuks Methodology: 25-word limit + questions)
         if (callData.leadType === 'B2C') {
-          const validation = validateSalesResponse(aiText);
+          const validation = ChuksMethodology.validateResponse(aiText);
           
           if (!validation.valid) {
-            console.warn(`[Claude API] ⚠️  Response validation: ${validation.message}`);
-            console.warn(`[Claude API] ⚠️  Word count: ${validation.wordCount} (max 25)`);
-            console.warn(`[Claude API] ⚠️  Ends with question: ${validation.endsWithQuestion}`);
-            console.warn(`[Claude API] ⚠️  Response: "${aiText}"`);
+            console.log('[Chuks Methodology] ⚠️  Response quality warnings:');
+            validation.warnings.forEach(w => console.log(`  ${w}`));
             // Still use the response, but flag for monitoring
           } else {
             console.log(`[Claude API] ✅ Response validated: ${validation.wordCount} words, ends with question`);
@@ -649,12 +655,13 @@ class TwilioService {
     const userWordCount = userSpeech.split(' ').length;
     const intentScore = callData.intentScore || 0;
 
-    // ⚡ B2C: ENFORCE BREVITY (25-word limit = ~35 tokens max)
+    // ✅ B2C: OPTIMIZED FOR SPEED (Chuks Methodology: 25-word limit)
     if (callData.leadType === 'B2C') {
-      if (intentScore < 30) return 80;   // Cold: Very short questions
-      if (intentScore < 60) return 100;  // Warm: Short + authority
-      if (intentScore < 75) return 120;  // Hot: Urgency
-      return 100;  // SQL: Direct close
+      // Shorter tokens = faster response (4x with Haiku)
+      if (intentScore < 30) return 60;   // Cold: Very short (was 80)
+      if (intentScore < 60) return 80;   // Warm: Short + authority (was 100)
+      if (intentScore < 75) return 100;  // Hot: Urgency (was 120)
+      return 80;  // SQL: Direct close (was 100)
     }
 
     // B2B: Allow longer responses (existing logic)
@@ -681,31 +688,36 @@ class TwilioService {
       console.log('[Twilio] 🎯 Using B2B prompt (Sales360 client acquisition)');
       return this._buildB2BPrompt(callData);
     } else if (leadType === 'B2C') {
-      // ⚡ PRODUCTION: Use Hybrid Sales Prompt
-      console.log('[Twilio] 🎯 Using B2C HYBRID SALES PROMPT (Sabri+Hormozi+Cardone+Patel+Chuks)');
+      // ✅ CHUKS METHODOLOGY V2 - Conversational + Regional Calibration
+      console.log('[Twilio] 🎯 Using CHUKS METHODOLOGY V2 (Regional + Conversational)');
       
-      // Build Zoho data object for prompt injection
-      const zohoData = {
+      // Build enriched lead data for Chuks Methodology
+      const leadData = {
         full_name: prospectName,
-        experience: traderProfile?.experience || 'Beginner',
-        stage: zohoLead?.stage || 'Cold',
-        intent_score: callData.intentScore || 0,
-        last_touch_channel: zohoLead?.lastTouchChannel || 'Email',
-        days_since_last_touch: zohoLead?.daysSinceLastTouch || 0,
+        age: traderProfile?.age || 30,
+        gender: traderProfile?.gender || 'Male',
+        country: region || 'United Kingdom',
+        lead_source: zohoLead?.leadSource || '',
+        entry_channel: zohoLead?.entryChannel || '',
+        interested_services: zohoLead?.interestedServices || [],
         current_challenges: zohoLead?.currentChallenges || '',
-        interested_services: zohoLead?.interestedServices || []
+        experience: traderProfile?.experience || 'Beginner'
       };
       
-      // Log pain point focus if available
-      if (zohoData.current_challenges) {
-        console.log('[Twilio] 🎯 Pain point focus:', zohoData.current_challenges);
-      }
+      // Get current IntentScore and Stage
+      const intentScore = callData.intentScore || 30;
+      const stage = zohoLead?.stage || 'Cold';
       
-      return buildB2CSalesPrompt(zohoData, {
-        conversationHistory: callData.conversationHistory,
-        currentTurn: callData.conversationHistory.length,
-        leadType: 'B2C'
-      });
+      // Log regional calibration
+      console.log(`[Twilio] 🌍 Region: ${leadData.country}`);
+      console.log(`[Twilio] 📊 IntentScore: ${intentScore} | Stage: ${stage}`);
+      
+      // Build prompt using Chuks Methodology
+      return ChuksMethodology.buildChuksMethodologyPrompt(
+        leadData,
+        intentScore,
+        stage
+      );
     } else {
       console.warn('[Twilio] ⚠️ Unknown Lead_Type, defaulting to B2B prompt');
       return this._buildB2BPrompt(callData);
