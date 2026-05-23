@@ -492,10 +492,10 @@ class TwilioService {
       const maxTokens = this._getOptimalTokens(callData, userSpeech);
       console.log(`[Claude API] 🎯 Using ${maxTokens} tokens for this response`);
       
-      // ✅ SPEED OPTIMIZATION: Use Haiku for B2C (4x faster), Sonnet for B2B
+      // ✅ SPEED OPTIMIZATION: Haiku 4.5 for B2C (4x faster!), Sonnet 4.5 for B2B
       const modelToUse = callData.leadType === 'B2C' 
-        ? 'claude-haiku-4-20250514'       // Fast for conversational sales (CORRECT MODEL NAME)
-        : 'claude-sonnet-4-20250514';     // Smart for complex B2B
+        ? 'claude-haiku-4-5'              // ✅ Haiku 4.5 - CORRECT MODEL NAME
+        : 'claude-sonnet-4-20250514';     // Sonnet 4.5 - Smart for B2B
       
       console.log(`[Claude API] 📊 Model: ${modelToUse}`);
 
