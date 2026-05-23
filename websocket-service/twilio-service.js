@@ -494,7 +494,7 @@ class TwilioService {
       
       // ✅ SPEED OPTIMIZATION: Use Haiku for B2C (4x faster), Sonnet for B2B
       const modelToUse = callData.leadType === 'B2C' 
-        ? 'claude-haiku-4-20250516'       // Fast for conversational sales
+        ? 'claude-haiku-4-20250514'       // Fast for conversational sales (CORRECT MODEL NAME)
         : 'claude-sonnet-4-20250514';     // Smart for complex B2B
       
       console.log(`[Claude API] 📊 Model: ${modelToUse}`);
