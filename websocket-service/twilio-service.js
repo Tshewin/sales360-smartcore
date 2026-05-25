@@ -529,18 +529,49 @@ class TwilioService {
 
       if (data.content && data.content[0]) {
         const fullText = data.content[0].text || '';
-        const jsonMatch = fullText.match(/\{[^{}]*"score"[^{}]*\}/);
         
         let aiText = fullText;
         let scoreData = null;
 
+        // ═══════════════════════════════════════════════════════════
+        // EXTRACT & REMOVE JSON METADATA (Multiple pattern matching)
+        // ═══════════════════════════════════════════════════════════
+        
+        // Pattern 1: Plain JSON on new line or at end
+        let jsonMatch = fullText.match(/\{[^{}]*"score"[^{}]*\}/);
+        
+        // Pattern 2: Markdown-wrapped JSON (```json ... ```)
+        if (!jsonMatch) {
+          const mdMatch = fullText.match(/```json\s*(\{[^}]*"score"[^}]*\})\s*```/);
+          if (mdMatch) jsonMatch = [mdMatch[1]];
+        }
+        
+        // Pattern 3: JSON with newlines/whitespace
+        if (!jsonMatch) {
+          jsonMatch = fullText.match(/\{\s*"score"\s*:\s*\d+[^}]*\}/);
+        }
+
         if (jsonMatch) {
           try {
             scoreData = JSON.parse(jsonMatch[0]);
-            aiText = fullText.replace(jsonMatch[0], '').trim();
+            
+            // Remove JSON from spoken text (all patterns)
+            aiText = fullText
+              .replace(/\{[^{}]*"score"[^{}]*\}/g, '')           // Plain JSON
+              .replace(/```json[\s\S]*?```/g, '')                // Markdown JSON
+              .replace(/\{\s*"score"\s*:\s*\d+[^}]*\}/g, '')    // Whitespace JSON
+              .replace(/\n\s*\n/g, '\n')                         // Double newlines
+              .trim();
+            
+            console.log(`[Claude API] ✅ Metadata extracted: Score ${scoreData.score}, Signal: ${scoreData.signal}`);
+            
           } catch (e) {
-            console.warn('[Claude API] Could not parse score JSON');
+            console.warn('[Claude API] ⚠️  Could not parse score JSON:', jsonMatch[0].substring(0, 50));
+            // Still remove the malformed JSON from spoken text
+            aiText = fullText.replace(jsonMatch[0], '').trim();
           }
+        } else {
+          console.warn('[Claude API] ⚠️  No score JSON found in response');
         }
 
         // ✅ VALIDATE RESPONSE (B2C only - Chuks Methodology: 25-word limit + questions)
@@ -556,9 +587,12 @@ class TwilioService {
           }
         }
 
+        // ═══════════════════════════════════════════════════════════
+        // SAVE TO CONVERSATION HISTORY (cleaned text only, NO JSON!)
+        // ═══════════════════════════════════════════════════════════
         callData.conversationHistory.push({
           role: 'assistant',
-          content: fullText
+          content: aiText  // ✅ CLEANED TEXT (JSON removed!)
         });
 
         if (scoreData && scoreData.score !== undefined) {
