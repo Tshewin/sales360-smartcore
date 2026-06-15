@@ -14,6 +14,9 @@ const ZohoService = require('./zoho-service');
 const ChuksMethodology = require('./CHUKS-METHODOLOGY-V2');
 const RegionalCalibration = require('./REGIONAL-CALIBRATION');
 
+// ✅ SALES360 MASTER PROMPT V1: 24 Rules + Regional Modules (Nigeria/UAE/UK)
+const { Sales360MasterPrompt } = require('./SALES360-MASTER-PROMPT-V1');
+
 class TwilioService {
   constructor(elevenLabsService = null, zohoService = null) {
     this.accountSid = process.env.TWILIO_ACCOUNT_SID;
@@ -722,36 +725,39 @@ class TwilioService {
       console.log('[Twilio] 🎯 Using B2B prompt (Sales360 client acquisition)');
       return this._buildB2BPrompt(callData);
     } else if (leadType === 'B2C') {
-      // ✅ CHUKS METHODOLOGY V2 - Conversational + Regional Calibration
-      console.log('[Twilio] 🎯 Using CHUKS METHODOLOGY V2 (Regional + Conversational)');
-      
-      // Build enriched lead data for Chuks Methodology
-      const leadData = {
-        full_name: prospectName,
-        age: traderProfile?.age || 30,
-        gender: traderProfile?.gender || 'Male',
-        country: region || 'United Kingdom',
-        lead_source: zohoLead?.leadSource || '',
-        entry_channel: zohoLead?.entryChannel || '',
-        interested_services: zohoLead?.interestedServices || [],
-        current_challenges: zohoLead?.currentChallenges || '',
-        experience: traderProfile?.experience || 'Beginner'
+      // ✅ SALES360 MASTER PROMPT V1 - 24 Rules + Regional Modules
+      console.log('[Twilio] 🎯 Using SALES360 MASTER PROMPT V1 (24 Rules + Regional)');
+
+      // Map region to master prompt format
+      const regionMap = {
+        'Nigeria': 'nigeria',
+        'United Kingdom': 'uk',
+        'UK': 'uk',
+        'Dubai': 'uae',
+        'UAE': 'uae',
+        'South Africa': 'nigeria' // defaults to warm tone
       };
-      
-      // Get current IntentScore and Stage
-      const intentScore = callData.intentScore || 30;
-      const stage = zohoLead?.stage || 'Cold';
-      
-      // Log regional calibration
-      console.log(`[Twilio] 🌍 Region: ${leadData.country}`);
-      console.log(`[Twilio] 📊 IntentScore: ${intentScore} | Stage: ${stage}`);
-      
-      // Build prompt using Chuks Methodology
-      return ChuksMethodology.buildChuksMethodologyPrompt(
-        leadData,
-        intentScore,
-        stage
-      );
+      const mappedRegion = regionMap[region] || 'nigeria';
+
+      console.log(`[Twilio] 🌍 Region: ${region} → ${mappedRegion}`);
+      console.log(`[Twilio] 📊 IntentScore: ${callData.intentScore || 0} | Stage: ${zohoLead?.stage || 'Cold'}`);
+
+      return Sales360MasterPrompt.buildPrompt({
+        region: mappedRegion,
+        brokerName: zohoLead?.brokerName || 'HFM',
+        name: prospectName,
+        age: traderProfile?.age || 30,
+        city: zohoLead?.city || region,
+        callType: callType || 'Outbound Follow-up',
+        intentScore: callData.intentScore || 0,
+        source: zohoLead?.leadSource || '',
+        product: zohoLead?.interestedServices?.join(', ') || 'FX Trading',
+        experience: traderProfile?.experience || 'Beginner',
+        pain: zohoLead?.currentChallenges || '',
+        capital: zohoLead?.budgetReadiness || '',
+        lastAction: zohoLead?.lastTouchAt || '',
+        market: 'FX Brokerage'
+      });
     } else {
       console.warn('[Twilio] ⚠️ Unknown Lead_Type, defaulting to B2B prompt');
       return this._buildB2BPrompt(callData);
