@@ -14,8 +14,8 @@ const ZohoService = require('./zoho-service');
 const ChuksMethodology = require('./CHUKS-METHODOLOGY-V2');
 const RegionalCalibration = require('./REGIONAL-CALIBRATION');
 
-// ✅ SALES360 MASTER PROMPT V1: 24 Rules + Regional Modules (Nigeria/UAE/UK)
-const { Sales360MasterPrompt } = require('./SALES360-MASTER-PROMPT-V1');
+// ✅ SALES360 MASTER PROMPT V2: Haiku-Optimised, 674 tokens, 24 rules compressed
+const { Sales360MasterPromptV2 } = require('./SALES360-MASTER-PROMPT-V2');
 
 class TwilioService {
   constructor(elevenLabsService = null, zohoService = null) {
@@ -318,16 +318,18 @@ class TwilioService {
       }
     }
 
-    // Continue with speech gathering
+    // Continue with speech gathering — optimised for natural interruptions
     const gather = twiml.gather({
       input: 'speech',
       action: `${this.webhookBaseUrl}/twilio/gather`,
       method: 'POST',
-      timeout: 60,
-      speechTimeout: 'auto',
+      timeout: 10,           // ✅ Was 60 — shorter = faster response to silence
+      speechTimeout: '1',    // ✅ Was 'auto' — 1 second pause = natural conversation pace
       speechModel: 'phone_call',
       enhanced: true,
-      language: 'en-GB'
+      language: 'en-GB',
+      partialResultCallback: `${this.webhookBaseUrl}/twilio/partial`, // ✅ Detect speech starting
+      partialResultCallbackMethod: 'POST'
     });
     gather.pause({ length: 1 });
 
@@ -445,8 +447,8 @@ class TwilioService {
         input: 'speech',
         action: `${this.webhookBaseUrl}/twilio/gather`,
         method: 'POST',
-        timeout: 60,
-        speechTimeout: 'auto',
+        timeout: 10,
+        speechTimeout: '1',
         speechModel: 'phone_call',
         enhanced: true,
         language: 'en-GB'
@@ -725,24 +727,23 @@ class TwilioService {
       console.log('[Twilio] 🎯 Using B2B prompt (Sales360 client acquisition)');
       return this._buildB2BPrompt(callData);
     } else if (leadType === 'B2C') {
-      // ✅ SALES360 MASTER PROMPT V1 - 24 Rules + Regional Modules
-      console.log('[Twilio] 🎯 Using SALES360 MASTER PROMPT V1 (24 Rules + Regional)');
+      // ✅ SALES360 MASTER PROMPT V2 - Haiku-Optimised (674 tokens, fast!)
+      console.log('[Twilio] 🎯 Using SALES360 MASTER PROMPT V2 (Haiku-Optimised)');
 
-      // Map region to master prompt format
       const regionMap = {
         'Nigeria': 'nigeria',
         'United Kingdom': 'uk',
         'UK': 'uk',
         'Dubai': 'uae',
         'UAE': 'uae',
-        'South Africa': 'nigeria' // defaults to warm tone
+        'South Africa': 'nigeria'
       };
       const mappedRegion = regionMap[region] || 'nigeria';
 
       console.log(`[Twilio] 🌍 Region: ${region} → ${mappedRegion}`);
       console.log(`[Twilio] 📊 IntentScore: ${callData.intentScore || 0} | Stage: ${zohoLead?.stage || 'Cold'}`);
 
-      return Sales360MasterPrompt.buildPrompt({
+      return Sales360MasterPromptV2.buildPrompt({
         region: mappedRegion,
         brokerName: zohoLead?.brokerName || 'HFM',
         name: prospectName,
