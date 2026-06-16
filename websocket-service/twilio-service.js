@@ -280,8 +280,10 @@ class TwilioService {
       ? this._getDynamicGreeting(prospectName, traderProfile)
       : this._getGreeting(scenario, prospectName, region);
     
-    // ⚡ OPTIMIZATION: Check cache first
-    const cacheKey = `${prospectName}-${region}-${scenario}`;
+    // ⚡ OPTIMIZATION: Cache key includes region + leadType so each market gets own greeting
+    // This prevents stale "AI assistant" greetings being served to Nigerian prospects
+    const leadType = traderProfile?.leadType || 'default';
+    const cacheKey = `${prospectName}-${region}-${scenario}-${leadType}`;
     
     if (this.greetingCache.has(cacheKey)) {
       console.log(`[Twilio Service] ⚡ Using cached greeting for: ${prospectName}`);
@@ -318,18 +320,18 @@ class TwilioService {
       }
     }
 
-    // Continue with speech gathering — optimised for natural interruptions
+    // Continue with speech gathering — balanced for natural conversation
+    // speechTimeout: 'auto' = Twilio detects natural end of speech (handles mid-sentence pauses)
+    // timeout: 15 = wait up to 15s for prospect to start speaking after AI finishes
     const gather = twiml.gather({
       input: 'speech',
       action: `${this.webhookBaseUrl}/twilio/gather`,
       method: 'POST',
-      timeout: 10,           // ✅ Was 60 — shorter = faster response to silence
-      speechTimeout: '1',    // ✅ Was 'auto' — 1 second pause = natural conversation pace
+      timeout: 15,
+      speechTimeout: 'auto',   // ✅ Handles natural mid-sentence pauses correctly
       speechModel: 'phone_call',
       enhanced: true,
-      language: 'en-GB',
-      partialResultCallback: `${this.webhookBaseUrl}/twilio/partial`, // ✅ Detect speech starting
-      partialResultCallbackMethod: 'POST'
+      language: 'en-GB'
     });
     gather.pause({ length: 1 });
 
@@ -447,8 +449,8 @@ class TwilioService {
         input: 'speech',
         action: `${this.webhookBaseUrl}/twilio/gather`,
         method: 'POST',
-        timeout: 10,
-        speechTimeout: '1',
+        timeout: 15,
+        speechTimeout: 'auto',
         speechModel: 'phone_call',
         enhanced: true,
         language: 'en-GB'
@@ -931,24 +933,63 @@ OPENING: "${opening}"`;
   }
 
   _getGreeting(scenario, name, region) {
+    const firstName = name.split(' ')[0];
+    const normalizedRegion = (region || '').toLowerCase();
+
     if (scenario === 'broker') {
-      return `Good afternoon ${name.split(' ')[0]}, this is Sales360 AI. I'm calling following your enquiry about reducing trader churn. Do you have a moment?`;
+      // B2B — always professional, no AI mention
+      return `Good afternoon ${firstName}, this is Samuel from Sales360. I'm calling following your enquiry about reducing trader churn. Do you have a moment?`;
+    }
+
+    // B2C — region-aware, never mention AI for Nigeria/UAE
+    if (normalizedRegion.includes('nigeria')) {
+      return `Hey ${firstName}! This is Emeka from HFM. I saw you signed up with us but haven't activated your account yet. What's up with that?`;
+    } else if (normalizedRegion.includes('dubai') || normalizedRegion.includes('uae')) {
+      return `Good afternoon ${firstName}, this is Omar from HFM. I'm calling about your recent registration with us. Is now a good time for a quick chat?`;
     } else {
-      return `Hey ${name.split(' ')[0]}! This is Sales360 AI. I saw you signed up but haven't activated your account yet. What's up with that?`;
+      // UK and others — transparent about being AI assistant
+      return `Hi ${firstName}, this is James, the AI assistant from HFM. I'm following up on your recent signup. Is now a good time for a quick chat?`;
     }
   }
 
   _getDynamicGreeting(name, traderProfile) {
-    const { age, region, leadType } = traderProfile;
+    const { age, region, leadType, gender } = traderProfile;
     const firstName = name.split(' ')[0];
     const timeOfDay = new Date().getHours() < 12 ? 'morning' : new Date().getHours() < 17 ? 'afternoon' : 'evening';
-    
-    if (leadType === 'inbound_warm') {
-      return `Good ${timeOfDay}, ${firstName}! This is the AI assistant from HFM. I'm following up on your inquiry. Do you have a moment?`;
-    } else if (leadType === 'outbound_cold' && age > 45) {
-      return `Good ${timeOfDay}, ${traderProfile.gender === 'Male' ? 'Sir' : 'Madam'}. Am I speaking with ${name}?`;
+    const normalizedRegion = (region || '').toLowerCase();
+
+    // ═══════════════════════════════════════════════════
+    // NIGERIA — Never mention AI. Warm, human, peer-level
+    // ═══════════════════════════════════════════════════
+    if (normalizedRegion.includes('nigeria')) {
+      if (age > 45) {
+        // Senior Nigerian — respectful, formal opener
+        return `Good ${timeOfDay}. Am I speaking with ${name}?`;
+      } else if (leadType === 'inbound_warm' || leadType === 'Warm Lead') {
+        // Young warm Nigerian — casual, energetic
+        return `Hey ${firstName}! This is Emeka from HFM. I saw you signed up with us couple days back — what's been going on?`;
+      } else {
+        // Young cold Nigerian — friendly cold opener
+        return `Hey ${firstName}, this is Emeka from HFM. How you doing today, bro?`;
+      }
+    }
+
+    // ═══════════════════════════════════════════════════
+    // UAE/DUBAI — Never mention AI. Premium, confident
+    // ═══════════════════════════════════════════════════
+    if (normalizedRegion.includes('dubai') || normalizedRegion.includes('uae')) {
+      return `Good ${timeOfDay} ${firstName}, this is Omar from HFM. I'm calling regarding your account with us. Do you have two minutes?`;
+    }
+
+    // ═══════════════════════════════════════════════════
+    // UK — Transparent AI mention is fine. Professional.
+    // ═══════════════════════════════════════════════════
+    if (leadType === 'inbound_warm' || leadType === 'Warm Lead') {
+      return `Good ${timeOfDay} ${firstName}, this is James, the AI assistant from HFM. I'm following up on your recent enquiry. Is now a good time?`;
+    } else if (age > 45) {
+      return `Good ${timeOfDay}. Am I speaking with ${name}?`;
     } else {
-      return `Hi ${firstName}! This is the AI assistant from HFM. Are you trading right now?`;
+      return `Hi ${firstName}, this is James from HFM. Are you free for a quick chat about your trading goals?`;
     }
   }
 

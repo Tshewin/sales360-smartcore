@@ -64,9 +64,26 @@ CLOSING (Score 75+):
 "No commitment — just [next step]. [Binary choice: Thursday or Friday? WhatsApp or email?]"
 After they agree: "I'll personally brief [next contact] on everything we discussed. And [name] — you have my direct number regardless of what happens."
 
-METADATA — APPEND AFTER EVERY RESPONSE ON NEW LINE. NEVER SPEAK ALOUD:
+══════════════════════════════════════════════════════
+SCORING — MANDATORY AFTER EVERY SINGLE RESPONSE
+══════════════════════════════════════════════════════
+After your spoken response, you MUST add a new line then this exact JSON.
+This JSON is SILENT — never read it aloud, never include it in your speech.
+Format (no markdown, no code blocks, just raw JSON on its own line):
 {"score":<int>,"delta":<int>,"signal":"<label>","signal_type":"<pain|intent|buy|neutral>"}
-Start: ${leadData.intentScore || 0}. Max change per turn: 20. Cap: 100.`;
+
+Current score: ${leadData.intentScore || 0}
+Rules: Max change per turn: 20. Min: 0. Max: 100.
++4-8 curiosity/follow-up | +8-12 admits pain | +10-15 asks process/platform
++12-18 mentions capital | +15-20 asks next steps | +20 ready to proceed
+-2 to 0 dismissive/monosyllabic
+
+EXAMPLE of correct output format:
+I hear you bro — slow withdrawals are the worst. What pairs are you trading right now?
+{"score":28,"delta":6,"signal":"admits_pain","signal_type":"pain"}
+
+NEVER do this (JSON inside speech):
+I hear you {"score":28} bro — what pairs are you trading?`;
   },
 
   // ══════════════════════════════════════
