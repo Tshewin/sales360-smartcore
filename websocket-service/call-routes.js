@@ -1,9 +1,67 @@
 // ═══════════════════════════════════════════════════════════
 // SALES360 CALL API ROUTES - WITH REAL AI CONVERSATION + ELEVENLABS
 // + DYNAMIC TRADER PROFILING (Phase 3A)
+// + AUTO-CALL PIPELINE (Phase 3D) — CRM → Instant AI Call
 // ═══════════════════════════════════════════════════════════
 
 const express = require('express');
+
+// ═══════════════════════════════════════════════════════════
+// BUSINESS HOURS CONFIG
+// ═══════════════════════════════════════════════════════════
+const BUSINESS_HOURS = {
+  Nigeria:      { start: 9, end: 18, timezone: 'Africa/Lagos' },
+  UK:           { start: 9, end: 18, timezone: 'Europe/London' },
+  Dubai:        { start: 9, end: 18, timezone: 'Asia/Dubai' },
+  'South Africa': { start: 9, end: 18, timezone: 'Africa/Johannesburg' },
+};
+
+// IntentScore thresholds per region — below this, don't auto-call
+const CALL_THRESHOLDS = {
+  Nigeria:        0,   // Call everyone
+  UK:             40,  // Only engaged leads
+  Dubai:          30,  // Warm leads only
+  'South Africa': 0,   // Call everyone (like Nigeria)
+  default:        0,
+};
+
+// Call delay in ms (5 minutes — feels natural, not robotic)
+const CALL_DELAY_MS = 5 * 60 * 1000;
+
+function isBusinessHours(region) {
+  const config = BUSINESS_HOURS[region] || BUSINESS_HOURS['Nigeria'];
+  const now = new Date();
+  const localTime = new Intl.DateTimeFormat('en-GB', {
+    timeZone: config.timezone,
+    hour: 'numeric',
+    hour12: false,
+  }).format(now);
+  const hour = parseInt(localTime, 10);
+  return hour >= config.start && hour < config.end;
+}
+
+function getNextBusinessHourMs(region) {
+  const config = BUSINESS_HOURS[region] || BUSINESS_HOURS['Nigeria'];
+  const now = new Date();
+  const formatter = new Intl.DateTimeFormat('en-GB', {
+    timeZone: config.timezone,
+    hour: 'numeric', minute: 'numeric',
+    hour12: false,
+  });
+  const [hourStr, minStr] = formatter.format(now).split(':');
+  const hour = parseInt(hourStr, 10);
+  const min  = parseInt(minStr, 10);
+
+  // Minutes until 9am today or tomorrow
+  let minsUntilOpen;
+  if (hour < config.start) {
+    minsUntilOpen = (config.start - hour) * 60 - min;
+  } else {
+    // Past business hours — schedule for 9am tomorrow
+    minsUntilOpen = (24 - hour + config.start) * 60 - min;
+  }
+  return minsUntilOpen * 60 * 1000;
+}
 
 function setupCallRoutes(wsServer, twilioService, elevenLabsService) {
   const router = express.Router();
@@ -322,6 +380,181 @@ function setupCallRoutes(wsServer, twilioService, elevenLabsService) {
     } catch (error) {
       console.error('[Twilio Webhook] Error in /twilio/recording:', error);
       res.status(500).send('Error processing recording webhook');
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  // AUTO-CALL PIPELINE — Zoho Webhook Receiver
+  // Zoho fires this when a new lead is created in CRM
+  // ═══════════════════════════════════════════════════════════
+
+  router.post('/zoho/webhook/new-lead', async (req, res) => {
+    try {
+      console.log('[Auto-Call] 📥 Zoho webhook received — new lead');
+
+      const { leadId, phone, name, region, leadType, intentScore } = req.body;
+
+      // ── Validate ──────────────────────────────────────────
+      if (!leadId || !phone) {
+        console.warn('[Auto-Call] ⚠️  Missing leadId or phone — skipping');
+        return res.status(400).json({ success: false, error: 'leadId and phone required' });
+      }
+
+      // ── B2B leads — never auto-call ────────────────────────
+      if (leadType === 'B2B' || leadType === 'broker') {
+        console.log(`[Auto-Call] ⏭️  B2B lead ${leadId} — skipping auto-call (manual outreach only)`);
+        return res.json({ success: true, action: 'skipped', reason: 'B2B lead — manual outreach required' });
+      }
+
+      // ── IntentScore threshold check ─────────────────────────
+      const threshold = CALL_THRESHOLDS[region] ?? CALL_THRESHOLDS.default;
+      const score = intentScore || 0;
+      if (score < threshold) {
+        console.log(`[Auto-Call] ⏭️  Score ${score} below threshold ${threshold} for ${region} — skipping`);
+        return res.json({ success: true, action: 'skipped', reason: `Score ${score} below ${region} threshold (${threshold})` });
+      }
+
+      // ── Acknowledge Zoho immediately ───────────────────────
+      res.json({ success: true, action: 'queued', leadId });
+
+      // ── Business hours check ───────────────────────────────
+      const inHours = isBusinessHours(region || 'Nigeria');
+      const delayMs = inHours
+        ? CALL_DELAY_MS                       // 5 min delay during business hours
+        : getNextBusinessHourMs(region);       // Queue until 9am
+
+      if (!inHours) {
+        console.log(`[Auto-Call] 🌙 Outside business hours for ${region} — queued for ${Math.round(delayMs/60000)} mins`);
+      } else {
+        console.log(`[Auto-Call] ✅ Business hours confirmed for ${region} — calling in 5 mins`);
+      }
+
+      // ── Schedule the call ──────────────────────────────────
+      setTimeout(async () => {
+        try {
+          console.log(`[Auto-Call] 📞 Firing AI call for lead ${leadId} (${name})`);
+
+          const result = await twilioService.makeCall({
+            to:           phone,
+            prospectName: name || 'there',
+            region:       region || 'Nigeria',
+            callType:     'trader',
+            scenario:     'trader',
+            leadId:       leadId,
+          });
+
+          if (result.success) {
+            console.log(`[Auto-Call] ✅ Call initiated — SID: ${result.callSid}`);
+          } else {
+            console.error(`[Auto-Call] ❌ Call failed:`, result.error);
+          }
+        } catch (err) {
+          console.error(`[Auto-Call] ❌ Scheduled call error:`, err.message);
+        }
+      }, delayMs);
+
+    } catch (error) {
+      console.error('[Auto-Call] ❌ Webhook error:', error.message);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  // LEAD SEARCH — For CallTestingCenter Lead Search UI
+  // ═══════════════════════════════════════════════════════════
+
+  router.get('/zoho/leads/search', async (req, res) => {
+    try {
+      const { q, per_page = 8 } = req.query;
+
+      if (!q || q.length < 2) {
+        return res.json({ leads: [] });
+      }
+
+      // Get ZohoService instance from twilioService if available
+      const zohoService = twilioService?.zohoService;
+      if (!zohoService || !zohoService.isEnabled()) {
+        return res.json({ leads: [], message: 'Zoho integration not enabled' });
+      }
+
+      const token = await zohoService.getAccessToken();
+      if (!token) {
+        return res.status(500).json({ leads: [], error: 'Could not get Zoho token' });
+      }
+
+      // Search Zoho CRM leads by name or email
+      const searchUrl = `${zohoService.apiDomain}/crm/v2/Leads/search?criteria=(Full_Name:contains:${encodeURIComponent(q)})&per_page=${per_page}&fields=id,Full_Name,Phone,Email,Country,SmartScore_intent1,Lead_Type,Interested_Services`;
+
+      const response = await fetch(searchUrl, {
+        headers: { 'Authorization': `Zoho-oauthtoken ${token}` }
+      });
+
+      if (!response.ok) {
+        const err = await response.text();
+        console.error('[Lead Search] Zoho error:', err);
+        return res.json({ leads: [] });
+      }
+
+      const data = await response.json();
+      const leads = (data.data || []).map(lead => ({
+        id:           lead.id,
+        name:         lead.Full_Name || '',
+        phone:        lead.Phone || '',
+        email:        lead.Email || '',
+        country:      lead.Country || '',
+        intent_score: lead.SmartScore_intent1 || 0,
+        lead_type:    lead.Lead_Type || 'B2C',
+        product:      lead.Interested_Services || 'FX',
+      }));
+
+      console.log(`[Lead Search] Found ${leads.length} results for "${q}"`);
+      res.json({ leads });
+
+    } catch (error) {
+      console.error('[Lead Search] Error:', error.message);
+      res.status(500).json({ leads: [], error: error.message });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  // LEAD LIST — For Dashboard pipeline view
+  // ═══════════════════════════════════════════════════════════
+
+  router.get('/zoho/leads', async (req, res) => {
+    try {
+      const { view, per_page = 50 } = req.query;
+      const zohoService = twilioService?.zohoService;
+
+      if (!zohoService || !zohoService.isEnabled()) {
+        return res.json({ leads: [] });
+      }
+
+      const token = await zohoService.getAccessToken();
+      if (!token) return res.status(500).json({ leads: [] });
+
+      const url = `${zohoService.apiDomain}/crm/v2/Leads?per_page=${per_page}&fields=id,Full_Name,Company,Phone,Country,SmartScore_intent1,SmartStage,Lead_Type`;
+      const response = await fetch(url, {
+        headers: { 'Authorization': `Zoho-oauthtoken ${token}` }
+      });
+
+      if (!response.ok) return res.json({ leads: [] });
+
+      const data = await response.json();
+      const leads = (data.data || []).map(lead => ({
+        id:      lead.id,
+        name:    lead.Full_Name || '',
+        company: lead.Company || '',
+        phone:   lead.Phone || '',
+        country: lead.Country || '',
+        score:   lead.SmartScore_intent1 || 0,
+        intent:  lead.SmartScore_intent1 || 0,
+        stage:   lead.SmartStage || 'Cold',
+      }));
+
+      res.json({ leads });
+    } catch (error) {
+      console.error('[Leads] Error:', error.message);
+      res.status(500).json({ leads: [] });
     }
   });
 
