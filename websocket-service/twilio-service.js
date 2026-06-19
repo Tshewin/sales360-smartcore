@@ -933,7 +933,12 @@ OPENING: "${opening}"`;
   }
 
   _getGreeting(scenario, name, region) {
-    const firstName = name.split(' ')[0];
+    // ✅ FIX: Skip honorifics (Mr. Mrs. Dr. Chief etc.)
+    const HONORIFICS = ['Mr.','Mrs.','Ms.','Miss','Dr.','Prof.','Chief','Alhaji','Alhaja','Sir'];
+    const nameParts = name.trim().split(' ');
+    const firstName = HONORIFICS.includes(nameParts[0]) 
+      ? (nameParts[1] || nameParts[0]) 
+      : nameParts[0];
     const normalizedRegion = (region || '').toLowerCase();
 
     if (scenario === 'broker') {
@@ -954,7 +959,11 @@ OPENING: "${opening}"`;
 
   _getDynamicGreeting(name, traderProfile) {
     const { age, region, leadType, gender } = traderProfile;
-    const firstName = name.split(' ')[0];
+    const HONORIFICS = ['Mr.','Mrs.','Ms.','Miss','Dr.','Prof.','Chief','Alhaji','Alhaja','Sir'];
+    const _nameParts = name.trim().split(' ');
+    const firstName = HONORIFICS.includes(_nameParts[0]) 
+      ? (_nameParts[1] || _nameParts[0]) 
+      : _nameParts[0];
     const timeOfDay = new Date().getHours() < 12 ? 'morning' : new Date().getHours() < 17 ? 'afternoon' : 'evening';
     const normalizedRegion = (region || '').toLowerCase();
 
