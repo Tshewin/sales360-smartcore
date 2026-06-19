@@ -391,30 +391,38 @@ function setupCallRoutes(wsServer, twilioService, elevenLabsService) {
   router.post('/zoho/webhook/new-lead', async (req, res) => {
     try {
       console.log('[Auto-Call] 📥 Zoho webhook received — new lead');
-      console.log('[Auto-Call] 📦 Raw body:', JSON.stringify(req.body, null, 2));
-      console.log('[Auto-Call] 📋 Headers:', req.headers['content-type']);
+      console.log('[Auto-Call] 📦 Body:', JSON.stringify(req.body));
+      console.log('[Auto-Call] 🔗 Query:', JSON.stringify(req.query));
+      console.log('[Auto-Call] 📋 Content-Type:', req.headers['content-type']);
 
-      // ── Zoho sends parameters in different formats depending on webhook type
-      // Format 1: { leadId, phone, name, ... }          (JSON body)
-      // Format 2: { module: { leadId, phone, ... } }    (nested)
-      // Format 3: form-encoded flat fields
-      const body = req.body || {};
-      const params = body.module || body.data || body;
+      // ── Zoho sends module parameters in different places:
+      // Sometimes body, sometimes query string, sometimes nested
+      const body  = req.body  || {};
+      const query = req.query || {};
 
-      const leadId      = params.leadId      || params.id          || params.Lead_Id    || '';
-      const phone       = params.phone       || params.Phone        || params.Mobile     || '';
-      const name        = params.name        || params.Lead_Name    || params.Full_Name  || '';
-      const region      = params.region      || params.Country      || 'Nigeria';
-      const leadType    = params.leadType    || params.Lead_Type    || 'B2C';
+      // Merge all sources — query string takes priority over body
+      const params = { ...body, ...query };
+
+      const leadId      = params.leadId      || params.id           || params.Lead_Id    || '';
+      const phone       = params.phone       || params.Phone         || params.Mobile     || '';
+      const name        = params.name        || params.Lead_Name     || params.Full_Name  || '';
+      const region      = params.region      || params.Country       || 'Nigeria';
+      const leadType    = params.leadType    || params.Lead_Type     || 'B2C';
       const intentScore = params.intentScore || params.SmartScore_intent1 || 0;
 
-      console.log('[Auto-Call] 📊 Parsed values:');
-      console.log(`  leadId:      ${leadId}`);
-      console.log(`  phone:       ${phone}`);
-      console.log(`  name:        ${name}`);
-      console.log(`  region:      ${region}`);
-      console.log(`  leadType:    ${leadType}`);
-      console.log(`  intentScore: ${intentScore}`);
+      // ── Last resort: try parsing raw body manually if all else empty ──
+      if (!leadId && !phone && req.rawBody) {
+        try {
+          const rawParams = new URLSearchParams(req.rawBody);
+          const leadIdRaw = rawParams.get('leadId') || rawParams.get('id') || '';
+          const phoneRaw  = rawParams.get('phone')  || rawParams.get('Phone') || '';
+          if (leadIdRaw) Object.assign(params, { leadId: leadIdRaw });
+          if (phoneRaw)  Object.assign(params, { phone: phoneRaw });
+          console.log('[Auto-Call] 📦 Raw params parsed:', Object.fromEntries(rawParams));
+        } catch(e) {
+          console.warn('[Auto-Call] Could not parse raw body:', e.message);
+        }
+      }
 
       // ── Validate ──────────────────────────────────────────
       if (!leadId || !phone) {
