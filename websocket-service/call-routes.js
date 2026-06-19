@@ -391,8 +391,30 @@ function setupCallRoutes(wsServer, twilioService, elevenLabsService) {
   router.post('/zoho/webhook/new-lead', async (req, res) => {
     try {
       console.log('[Auto-Call] 📥 Zoho webhook received — new lead');
+      console.log('[Auto-Call] 📦 Raw body:', JSON.stringify(req.body, null, 2));
+      console.log('[Auto-Call] 📋 Headers:', req.headers['content-type']);
 
-      const { leadId, phone, name, region, leadType, intentScore } = req.body;
+      // ── Zoho sends parameters in different formats depending on webhook type
+      // Format 1: { leadId, phone, name, ... }          (JSON body)
+      // Format 2: { module: { leadId, phone, ... } }    (nested)
+      // Format 3: form-encoded flat fields
+      const body = req.body || {};
+      const params = body.module || body.data || body;
+
+      const leadId      = params.leadId      || params.id          || params.Lead_Id    || '';
+      const phone       = params.phone       || params.Phone        || params.Mobile     || '';
+      const name        = params.name        || params.Lead_Name    || params.Full_Name  || '';
+      const region      = params.region      || params.Country      || 'Nigeria';
+      const leadType    = params.leadType    || params.Lead_Type    || 'B2C';
+      const intentScore = params.intentScore || params.SmartScore_intent1 || 0;
+
+      console.log('[Auto-Call] 📊 Parsed values:');
+      console.log(`  leadId:      ${leadId}`);
+      console.log(`  phone:       ${phone}`);
+      console.log(`  name:        ${name}`);
+      console.log(`  region:      ${region}`);
+      console.log(`  leadType:    ${leadType}`);
+      console.log(`  intentScore: ${intentScore}`);
 
       // ── Validate ──────────────────────────────────────────
       if (!leadId || !phone) {
