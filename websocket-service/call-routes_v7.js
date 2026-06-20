@@ -129,8 +129,7 @@ function setupCallRoutes(wsServer, twilioService, elevenLabsService) {
   // Voice webhook - Initial call connection
   router.post('/twilio/voice', async (req, res) => {
     try {
-      const { prospectName, region, scenario, traderProfile } = req.query;
-      const CallSid = req.body?.CallSid || req.query?.CallSid;
+      const { prospectName, region, scenario, traderProfile, CallSid } = req.query;
       
       console.log('[Twilio Webhook] Voice - Call connected:', CallSid);
       
@@ -163,8 +162,7 @@ function setupCallRoutes(wsServer, twilioService, elevenLabsService) {
   // Gather webhook - Process user speech and generate AI response
   router.post('/twilio/gather', async (req, res) => {
     try {
-      const SpeechResult = req.body?.SpeechResult || req.query?.SpeechResult;
-      const CallSid = req.body?.CallSid || req.query?.CallSid;
+      const { SpeechResult, CallSid } = req.body;
       
       if (!SpeechResult || SpeechResult.trim() === '') {
         console.log('[Twilio Webhook] Gather - No speech detected');

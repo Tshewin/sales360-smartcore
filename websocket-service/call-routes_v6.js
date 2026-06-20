@@ -129,8 +129,7 @@ function setupCallRoutes(wsServer, twilioService, elevenLabsService) {
   // Voice webhook - Initial call connection
   router.post('/twilio/voice', async (req, res) => {
     try {
-      const { prospectName, region, scenario, traderProfile } = req.query;
-      const CallSid = req.body?.CallSid || req.query?.CallSid;
+      const { prospectName, region, scenario, traderProfile, CallSid } = req.query;
       
       console.log('[Twilio Webhook] Voice - Call connected:', CallSid);
       
@@ -163,8 +162,7 @@ function setupCallRoutes(wsServer, twilioService, elevenLabsService) {
   // Gather webhook - Process user speech and generate AI response
   router.post('/twilio/gather', async (req, res) => {
     try {
-      const SpeechResult = req.body?.SpeechResult || req.query?.SpeechResult;
-      const CallSid = req.body?.CallSid || req.query?.CallSid;
+      const { SpeechResult, CallSid } = req.body;
       
       if (!SpeechResult || SpeechResult.trim() === '') {
         console.log('[Twilio Webhook] Gather - No speech detected');
@@ -221,9 +219,10 @@ function setupCallRoutes(wsServer, twilioService, elevenLabsService) {
       if (pendingResponse && pendingResponse.success && pendingResponse.audioUrl) {
         // ✅ Response ready! Play it
         console.log(`[Twilio Wait] ✅ Response ready for ${callSid}`);
-        console.log(`[Twilio Wait] 📤 Returning audio URL: ${pendingResponse.audioUrl}`);
         
-        // ✅ FIX: Create gather FIRST, then add play and pause INSIDE it
+        twiml.play(pendingResponse.audioUrl);
+        
+        // Continue gathering
         const gather = twiml.gather({
           input: 'speech',
           action: `${process.env.WEBHOOK_BASE_URL}/twilio/gather`,
@@ -234,15 +233,7 @@ function setupCallRoutes(wsServer, twilioService, elevenLabsService) {
           enhanced: true,
           language: 'en-GB'
         });
-        
-        // ✅ FIX: Play audio INSIDE the gather (so call doesn't end)
-        gather.play(pendingResponse.audioUrl);
         gather.pause({ length: 1 });
-        
-        // ✅ FIX: Add fallback if no speech detected (prevents hangup)
-        twiml.redirect({
-          method: 'POST'
-        }, `${process.env.WEBHOOK_BASE_URL}/twilio/gather`);
         
         // Clean up
         twilioService.pendingResponses.delete(callSid);
