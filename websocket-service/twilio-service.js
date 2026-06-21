@@ -320,15 +320,18 @@ class TwilioService {
       }
     }
 
-    // Continue with speech gathering — balanced for natural conversation
-    // speechTimeout: 'auto' = Twilio detects natural end of speech (handles mid-sentence pauses)
+    // Continue with speech gathering — tuned for Nigerian/African English cadence
+    // speechTimeout: 3 = wait 3 seconds of silence before treating speech as complete
+    //   WHY NOT 'auto': Twilio's auto detection cuts off mid-sentence for Nigerian English
+    //   WHY NOT 1: Too aggressive, fragments like "right now I" get submitted incomplete
+    //   WHY 3: Matches natural pause length in Nigerian conversational speech
     // timeout: 15 = wait up to 15s for prospect to start speaking after AI finishes
     const gather = twiml.gather({
       input: 'speech',
       action: `${this.webhookBaseUrl}/twilio/gather`,
       method: 'POST',
       timeout: 15,
-      speechTimeout: 'auto',   // ✅ Handles natural mid-sentence pauses correctly
+      speechTimeout: 3,              // ✅ FIX: Explicit 3s silence threshold (was 'auto')
       speechModel: 'phone_call',
       enhanced: true,
       language: 'en-GB'
@@ -450,7 +453,7 @@ class TwilioService {
         action: `${this.webhookBaseUrl}/twilio/gather`,
         method: 'POST',
         timeout: 15,
-        speechTimeout: 'auto',
+        speechTimeout: 3,              // ✅ FIX: Explicit 3s silence threshold (was 'auto')
         speechModel: 'phone_call',
         enhanced: true,
         language: 'en-GB'
@@ -696,13 +699,15 @@ class TwilioService {
     const userWordCount = userSpeech.split(' ').length;
     const intentScore = callData.intentScore || 0;
 
-    // ✅ B2C: OPTIMIZED FOR SPEED (Chuks Methodology: 25-word limit)
+    // ✅ B2C: BALANCED FOR SPEED + RELIABLE JSON OUTPUT
+    // WHY THESE NUMBERS: 25-word response ≈ 35 tokens + JSON scoring block ≈ 30 tokens = 65 minimum
+    // Previous 60-token limit caused Haiku to skip JSON entirely (confirmed in Railway logs)
+    // These values give Haiku room for text + JSON while keeping response times under 2s
     if (callData.leadType === 'B2C') {
-      // Shorter tokens = faster response (4x with Haiku)
-      if (intentScore < 30) return 60;   // Cold: Very short (was 80)
-      if (intentScore < 60) return 80;   // Warm: Short + authority (was 100)
-      if (intentScore < 75) return 100;  // Hot: Urgency (was 120)
-      return 80;  // SQL: Direct close (was 100)
+      if (intentScore < 30) return 100;  // Cold: Was 60 → Haiku ran out before JSON
+      if (intentScore < 60) return 120;  // Warm: Room for authority + JSON
+      if (intentScore < 75) return 140;  // Hot: Urgency + scoring
+      return 120;  // SQL: Direct close + JSON
     }
 
     // B2B: Allow longer responses (existing logic)
