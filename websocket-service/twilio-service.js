@@ -381,8 +381,9 @@ class TwilioService {
           intentScore: aiResponse.score,
           signals,
           transcript: {
-            role: 'assistant',
-            text: aiResponse.text
+            speaker: 'ai',
+            message: aiResponse.text,
+            timestamp: Date.now()
           }
         });
       }
@@ -465,6 +466,20 @@ class TwilioService {
 
     console.log(`[Twilio Webhook] 🎤 User said: ${speechResult}`);
 
+    // ✅ Broadcast USER speech to dashboard immediately
+    // Dashboard LiveTranscriptFeed.jsx expects: { speaker: 'prospect', message: '...' }
+    if (wsServer) {
+      wsServer.broadcast({
+        type: 'callUpdate',
+        callSid,
+        transcript: {
+          speaker: 'prospect',
+          message: speechResult,
+          timestamp: Date.now()
+        }
+      });
+    }
+
     // ⚡ ASYNC PATTERN: Start generating response in BACKGROUND (don't await!)
     this.generateResponseAsync(callSid, speechResult, wsServer);
     
@@ -502,10 +517,12 @@ class TwilioService {
       const maxTokens = this._getOptimalTokens(callData, userSpeech);
       console.log(`[Claude API] 🎯 Using ${maxTokens} tokens for this response`);
       
-      // ✅ SPEED OPTIMIZATION: Haiku 4.5 for B2C (4x faster!), Sonnet 4.5 for B2B
-      const modelToUse = callData.leadType === 'B2C' 
-        ? 'claude-haiku-4-5'              // ✅ Haiku 4.5 - CORRECT MODEL NAME
-        : 'claude-sonnet-4-20250514';     // Sonnet 4.5 - Smart for B2B
+      // ✅ SONNET FOR ALL CALLS — Quality over speed
+      // WHY: Haiku caused repetitive questions, poor context tracking, flat energy
+      // Sonnet adds ~1-1.5s latency but delivers genuine sales conversation intelligence
+      // The difference between a 2s and 3s pause is nothing on a phone call
+      // The difference between a bot and a salesperson is everything
+      const modelToUse = 'claude-sonnet-4-20250514';
       
       console.log(`[Claude API] 📊 Model: ${modelToUse}`);
 
@@ -584,18 +601,10 @@ class TwilioService {
           console.warn('[Claude API] ⚠️  No score JSON found in response');
         }
 
-        // ✅ VALIDATE RESPONSE (B2C only - Chuks Methodology: 25-word limit + questions)
-        if (callData.leadType === 'B2C') {
-          const validation = ChuksMethodology.validateResponse(aiText);
-          
-          if (!validation.valid) {
-            console.log('[Chuks Methodology] ⚠️  Response quality warnings:');
-            validation.warnings.forEach(w => console.log(`  ${w}`));
-            // Still use the response, but flag for monitoring
-          } else {
-            console.log(`[Claude API] ✅ Response validated: ${validation.wordCount} words, ends with question`);
-          }
-        }
+        // ✅ RESPONSE MONITORING (no hard limits — Sonnet manages its own length via prompt)
+        const wordCount = aiText.split(/\s+/).filter(w => w).length;
+        const endsWithQuestion = /\?['"]*\s*$/.test(aiText.trim());
+        console.log(`[Claude API] ✅ Response: ${wordCount} words${endsWithQuestion ? ', ends with question' : ''}`);
 
         // ═══════════════════════════════════════════════════════════
         // SAVE TO CONVERSATION HISTORY (cleaned text only, NO JSON!)
@@ -699,15 +708,14 @@ class TwilioService {
     const userWordCount = userSpeech.split(' ').length;
     const intentScore = callData.intentScore || 0;
 
-    // ✅ B2C: BALANCED FOR SPEED + RELIABLE JSON OUTPUT
-    // WHY THESE NUMBERS: 25-word response ≈ 35 tokens + JSON scoring block ≈ 30 tokens = 65 minimum
-    // Previous 60-token limit caused Haiku to skip JSON entirely (confirmed in Railway logs)
-    // These values give Haiku room for text + JSON while keeping response times under 2s
+    // ✅ B2C: SONNET NEEDS MORE ROOM FOR NATURAL CONVERSATION
+    // WHY: 25-word ceiling removed. Sonnet generates 2-3 natural sentences (~40-60 words)
+    // plus JSON scoring block (~30 tokens). These limits prevent rambling while allowing flow.
     if (callData.leadType === 'B2C') {
-      if (intentScore < 30) return 100;  // Cold: Was 60 → Haiku ran out before JSON
-      if (intentScore < 60) return 120;  // Warm: Room for authority + JSON
-      if (intentScore < 75) return 140;  // Hot: Urgency + scoring
-      return 120;  // SQL: Direct close + JSON
+      if (intentScore < 30) return 200;  // Cold: Discovery + rapport building
+      if (intentScore < 60) return 250;  // Warm: Deeper conversation + proof points
+      if (intentScore < 75) return 300;  // Hot: Objection handling needs room
+      return 250;  // SQL: Clean close + logistics
     }
 
     // B2B: Allow longer responses (existing logic)
