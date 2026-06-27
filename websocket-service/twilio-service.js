@@ -522,7 +522,7 @@ class TwilioService {
       // Sonnet adds ~1-1.5s latency but delivers genuine sales conversation intelligence
       // The difference between a 2s and 3s pause is nothing on a phone call
       // The difference between a bot and a salesperson is everything
-      const modelToUse = 'claude-sonnet-4-20250514';
+      const modelToUse = 'claude-sonnet-4-6';
       
       console.log(`[Claude API] 📊 Model: ${modelToUse}`);
 
