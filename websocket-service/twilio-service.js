@@ -208,6 +208,14 @@ class TwilioService {
           turns_since_last_question: 0,
           last_user_word_count: 0
         },
+
+        // CALL COMPLETION SYSTEM
+        silenceRetries: 0,        // Consecutive "no speech detected" counter (max 2 before ending)
+        maxSilenceRetries: 2,     // How many times to retry on silence
+        turnCount: 0,             // Total conversation turns
+        retryCount: callContext.retryCount || 0,  // How many times this lead has been called
+        callbackRequested: false,  // Prospect asked to be called back
+        callbackTime: null,        // When to call back
         
         // Score tracking
         intentScoreStart: callContext.intentScore,
@@ -447,21 +455,51 @@ class TwilioService {
       return twiml.toString();
     }
 
-    // Handle empty or silence speech
+    // Handle empty or silence speech — SMART RETRY before giving up
     if (!speechResult || speechResult.trim() === '') {
-      console.log('[Twilio Webhook] Gather - No speech detected');
+      const callData_silence = this.activeCalls.get(callSid);
+      const silenceCount = callData_silence ? (callData_silence.silenceRetries || 0) : 0;
+      
+      if (silenceCount >= (callData_silence?.maxSilenceRetries || 2)) {
+        // Max retries exhausted — end call gracefully
+        console.log(`[Twilio] 🔇 Max silence retries (${silenceCount}) reached — ending call`);
+        twiml.say({
+          voice: 'Polly.Matthew',
+          language: 'en-GB'
+        }, "Looks like we might have a bad connection. I'll try you again a bit later. Take care!");
+        twiml.hangup();
+        
+        if (callData_silence) {
+          callData_silence.callEndReason = 'silence_timeout';
+        }
+        return twiml.toString();
+      }
+
+      // Increment silence counter
+      if (callData_silence) {
+        callData_silence.silenceRetries = silenceCount + 1;
+      }
+
+      // Natural re-engagement messages (varies by retry count)
+      const reEngageMessages = [
+        "Hey, are you still there? I think the line might have dropped for a second.",
+        "Hello? Can you hear me? Just want to make sure we're still connected."
+      ];
+      const message = reEngageMessages[silenceCount] || reEngageMessages[0];
+      
+      console.log(`[Twilio] 🔇 No speech detected — retry ${silenceCount + 1}/${callData_silence?.maxSilenceRetries || 2}`);
       
       twiml.say({
         voice: 'Polly.Matthew',
         language: 'en-GB'
-      }, "I didn't catch that. Could you please repeat?");
+      }, message);
       
       const gather = twiml.gather({
         input: 'speech',
         action: `${this.webhookBaseUrl}/twilio/gather`,
         method: 'POST',
-        timeout: 15,
-        speechTimeout: 3,              // ✅ FIX: Explicit 3s silence threshold (was 'auto')
+        timeout: 10,
+        speechTimeout: 3,
         speechModel: 'phone_call',
         enhanced: true,
         language: 'en-GB'
@@ -469,6 +507,13 @@ class TwilioService {
       gather.pause({ length: 1 });
       
       return twiml.toString();
+    }
+
+    // Reset silence counter on successful speech
+    const callData_reset = this.activeCalls.get(callSid);
+    if (callData_reset) {
+      callData_reset.silenceRetries = 0;
+      callData_reset.turnCount = (callData_reset.turnCount || 0) + 1;
     }
 
     console.log(`[Twilio Webhook] 🎤 User said: ${speechResult}`);
@@ -505,11 +550,13 @@ class TwilioService {
       const callData = this.activeCalls.get(callSid);
       if (callData) {
         callData.engagementSignals.callback_requested = true;
+        callData.callbackRequested = true;
+        callData.callEndReason = 'prospect_busy';
       }
       twiml.say({
         voice: 'Polly.Matthew',
         language: 'en-GB'
-      }, "No worries at all! I'll catch you at a better time. Have a great day!");
+      }, "No worries at all! I'll give you a call back in about 30 minutes. Have a great day!");
       twiml.hangup();
       return twiml.toString();
     }
@@ -1214,6 +1261,29 @@ OPENING: "${opening}"`;
         const duration = Math.floor((new Date(callData.endTime) - new Date(callData.startTime)) / 1000);
         console.log(`[Twilio] Call ended. Duration: ${duration}s`);
         
+        // ═══════════════════════════════════════════════════════════
+        // CALL COMPLETION SYSTEM — Auto-retry dropped/incomplete calls
+        // ═══════════════════════════════════════════════════════════
+        const turnCount = callData.turnCount || 0;
+        const retryCount = callData.retryCount || 0;
+        const maxRetries = 2;
+        const isIncomplete = duration < 90 && turnCount < 3;
+        const wasBusy = callData.callbackRequested === true;
+        const wasSilenceTimeout = callData.callEndReason === 'silence_timeout';
+
+        if ((isIncomplete || wasBusy || wasSilenceTimeout) && retryCount < maxRetries) {
+          const retryDelayMs = wasBusy ? 30 * 60 * 1000 : 15 * 60 * 1000; // 30 min if busy, 15 min if dropped
+          const retryDelayMins = Math.round(retryDelayMs / 60000);
+          
+          console.log(`[Call Completion] 🔄 Scheduling retry #${retryCount + 1} in ${retryDelayMins} mins`);
+          console.log(`[Call Completion]    Reason: ${wasBusy ? 'prospect_busy' : wasSilenceTimeout ? 'silence_timeout' : 'incomplete_call'}`);
+          console.log(`[Call Completion]    Duration: ${duration}s, Turns: ${turnCount}, Retries: ${retryCount}/${maxRetries}`);
+
+          this._scheduleRetryCall(callData, retryDelayMs, retryCount + 1);
+        } else if (retryCount >= maxRetries) {
+          console.log(`[Call Completion] ❌ Max retries (${maxRetries}) reached for ${callData.prospectName}. No more attempts.`);
+        }
+
         if (callData.leadId && this.zoho.isEnabled()) {
           console.log(`[Twilio] Building post-call payload for lead: ${callData.leadId}`);
           
@@ -1259,6 +1329,43 @@ OPENING: "${opening}"`;
 
   handleStatusUpdate(callSid, status, body) {
     return this.handleStatus(callSid, status);
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // CALL COMPLETION — Schedule retry call after delay
+  // Handles: dropped calls, silence timeouts, busy prospects
+  // ═══════════════════════════════════════════════════════════
+  _scheduleRetryCall(originalCallData, delayMs, retryNumber) {
+    const { leadId, prospectName, region, leadType } = originalCallData;
+    const phone = originalCallData.zohoLead?.phone || null;
+    
+    if (!phone || !leadId) {
+      console.error('[Call Completion] ❌ Cannot schedule retry — missing phone or leadId');
+      return;
+    }
+
+    setTimeout(async () => {
+      try {
+        console.log(`[Call Completion] 📞 Firing retry #${retryNumber} for ${prospectName} (${phone})`);
+        
+        // Re-initiate the call with retry count passed through
+        await this.initiateCall({
+          leadId,
+          phone,
+          name: prospectName,
+          region,
+          leadType,
+          intentScore: originalCallData.intentScore || 0,
+          retryCount: retryNumber
+        });
+        
+        console.log(`[Call Completion] ✅ Retry #${retryNumber} initiated for ${prospectName}`);
+      } catch (error) {
+        console.error(`[Call Completion] ❌ Retry #${retryNumber} failed for ${prospectName}:`, error.message);
+      }
+    }, delayMs);
+    
+    console.log(`[Call Completion] ⏰ Timer set: ${prospectName} will be called in ${Math.round(delayMs / 60000)} minutes`);
   }
 
   async processUserResponse(callSid, speechResult, wsServer) {
