@@ -196,6 +196,19 @@ class TwilioService {
         objections: [],
         buyingSignals: [],
         
+        // ═══════════════════════════════════════════════════════════
+        // P1: CONVERSATION STATE TRACKING
+        // Both ChatGPT and Gemini recommended this as the #1 fix
+        // Eliminates repetitive questions by explicitly tracking what's known
+        // ═══════════════════════════════════════════════════════════
+        conversationState: {
+          known_facts: {},        // { goal: 'financial freedom', experience: 'beginner', ... }
+          asked_topics: [],       // ['goal', 'experience', 'timeline']
+          prospect_energy: 'unknown', // 'talkative', 'brief', 'hostile', 'engaged'
+          turns_since_last_question: 0,
+          last_user_word_count: 0
+        },
+        
         // Score tracking
         intentScoreStart: callContext.intentScore,
         intentScorePeak: callContext.intentScore,
@@ -364,22 +377,11 @@ class TwilioService {
 
       console.log(`[Twilio Async] 🤖 AI response: ${aiResponse.text.substring(0, 80)}...`);
 
-      // Broadcast to dashboard
-      if (wsServer && aiResponse.score !== undefined) {
-        const signals = [];
-        if (aiResponse.signal) {
-          signals.push({
-            type: aiResponse.signalType || 'neutral',
-            label: aiResponse.signal,
-            delta: aiResponse.delta || 0
-          });
-        }
-
+      // Broadcast AI transcript to dashboard IMMEDIATELY (no waiting for scoring)
+      if (wsServer) {
         wsServer.broadcast({
           type: 'callUpdate',
           callSid,
-          intentScore: aiResponse.score,
-          signals,
           transcript: {
             speaker: 'ai',
             message: aiResponse.text,
@@ -387,6 +389,11 @@ class TwilioService {
           }
         });
       }
+
+      // P2: Fire async scoring to Haiku — NON-BLOCKING
+      // Prospect never waits on this. Score updates arrive on dashboard async.
+      this._scoreConversationAsync(callData, speechResult, aiResponse.text, wsServer)
+        .catch(err => console.error('[Scoring] Background scoring failed:', err.message));
 
       // Generate audio with ElevenLabs
       const audioBuffer = await this.elevenLabs.generateAudio(
@@ -480,6 +487,75 @@ class TwilioService {
       });
     }
 
+    // ═══════════════════════════════════════════════════════════
+    // P3: APPLICATION-LAYER INTERCEPTS
+    // Handle edge cases in Node.js BEFORE hitting expensive Claude API
+    // ═══════════════════════════════════════════════════════════
+    const words = speechResult.trim().split(/\s+/);
+    const wordCount = words.length;
+    const lowerSpeech = speechResult.toLowerCase();
+
+    // P3a: "I'm busy / call me later" — instant sign-off, $0 LLM cost
+    const busyPatterns = ['busy', 'driving', 'call back', 'call me back', 'call later', 
+      'not a good time', 'in a meeting', 'call me later', 'ring me back', 'ring back'];
+    const isBusy = busyPatterns.some(p => lowerSpeech.includes(p));
+    
+    if (isBusy && wordCount < 15) {
+      console.log(`[Twilio] 🏃 Busy intercept triggered: "${speechResult}"`);
+      const callData = this.activeCalls.get(callSid);
+      if (callData) {
+        callData.engagementSignals.callback_requested = true;
+      }
+      twiml.say({
+        voice: 'Polly.Matthew',
+        language: 'en-GB'
+      }, "No worries at all! I'll catch you at a better time. Have a great day!");
+      twiml.hangup();
+      return twiml.toString();
+    }
+
+    // P3b: Garbled/nonsensical speech — short gibberish that makes no sense
+    // Only intercept very short fragments (1-2 words) that are clearly garbled
+    if (wordCount <= 2 && speechResult.length < 10) {
+      const commonShortPhrases = ['yes', 'no', 'yeah', 'ok', 'okay', 'sure', 'hello', 'hi',
+        'what', 'why', 'how', 'please', 'thanks', 'right', 'go ahead', 'continue', 'huh',
+        'sorry', 'pardon', 'repeat', 'hmm', 'true', 'exactly', 'correct'];
+      const isRecognisable = commonShortPhrases.some(p => lowerSpeech.includes(p));
+      
+      if (!isRecognisable) {
+        console.log(`[Twilio] 🔇 Garbled speech intercepted: "${speechResult}"`);
+        twiml.say({
+          voice: 'Polly.Matthew',
+          language: 'en-GB'
+        }, "Sorry, the line broke up for a second. Could you say that again?");
+        const gather = twiml.gather({
+          input: 'speech',
+          action: `${this.webhookBaseUrl}/twilio/gather`,
+          method: 'POST',
+          timeout: 15,
+          speechTimeout: 3,
+          speechModel: 'phone_call',
+          enhanced: true,
+          language: 'en-GB'
+        });
+        gather.pause({ length: 1 });
+        return twiml.toString();
+      }
+    }
+
+    // P4: Update pacing state for dynamic prompt modifier
+    const callData_pacing = this.activeCalls.get(callSid);
+    if (callData_pacing && callData_pacing.conversationState) {
+      callData_pacing.conversationState.last_user_word_count = wordCount;
+      if (wordCount < 5) {
+        callData_pacing.conversationState.prospect_energy = 'brief';
+      } else if (wordCount > 30) {
+        callData_pacing.conversationState.prospect_energy = 'talkative';
+      } else {
+        callData_pacing.conversationState.prospect_energy = 'engaged';
+      }
+    }
+
     // ⚡ ASYNC PATTERN: Start generating response in BACKGROUND (don't await!)
     this.generateResponseAsync(callSid, speechResult, wsServer);
     
@@ -492,8 +568,11 @@ class TwilioService {
     return twiml.toString(); // Returns in <500ms!
   }
 
+
   // ═══════════════════════════════════════════════════════════
-  // GET CLAUDE RESPONSE (WITH DYNAMIC PROMPTING!)
+  // GET CLAUDE RESPONSE — SPEECH TEXT ONLY (scoring decoupled)
+  // P2: Sonnet generates ONLY spoken text. No JSON. No scoring.
+  // Scoring fires asynchronously to Haiku after response is ready.
   // ═══════════════════════════════════════════════════════════
   async _getClaudeResponse(callData, userSpeech) {
     const startTime = Date.now();
@@ -506,9 +585,11 @@ class TwilioService {
         content: userSpeech
       });
 
-      // ⚡ BUILD DYNAMIC SYSTEM PROMPT
-      // ✅ CHATGPT RULE: Lead_Type is PRIMARY branching variable
-      const systemPrompt = this._selectPromptByLeadType(callData);
+      // BUILD DYNAMIC SYSTEM PROMPT + STATE HEADER + PACING
+      const basePrompt = this._selectPromptByLeadType(callData);
+      const stateHeader = this._buildStateHeader(callData);
+      const pacingMod = this._buildPacingModifier(callData);
+      const systemPrompt = `${basePrompt}\n\n${stateHeader}\n\n${pacingMod}`;
 
       console.log(`[Claude API] 📤 Sending request (turn ${callData.conversationHistory.length / 2})`);
       console.log(`[Claude API] 🎯 Lead Type: ${callData.leadType} | Call Type: ${callData.callType}`);
@@ -517,13 +598,7 @@ class TwilioService {
       const maxTokens = this._getOptimalTokens(callData, userSpeech);
       console.log(`[Claude API] 🎯 Using ${maxTokens} tokens for this response`);
       
-      // ✅ SONNET FOR ALL CALLS — Quality over speed
-      // WHY: Haiku caused repetitive questions, poor context tracking, flat energy
-      // Sonnet adds ~1-1.5s latency but delivers genuine sales conversation intelligence
-      // The difference between a 2s and 3s pause is nothing on a phone call
-      // The difference between a bot and a salesperson is everything
       const modelToUse = 'claude-sonnet-4-6';
-      
       console.log(`[Claude API] 📊 Model: ${modelToUse}`);
 
       const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -555,136 +630,25 @@ class TwilioService {
       console.log(`[Claude API] ✅ Response received in ${elapsedTime}ms`);
 
       if (data.content && data.content[0]) {
-        const fullText = data.content[0].text || '';
+        const aiText = (data.content[0].text || '').trim();
         
-        let aiText = fullText;
-        let scoreData = null;
-
-        // ═══════════════════════════════════════════════════════════
-        // EXTRACT & REMOVE JSON METADATA (Multiple pattern matching)
-        // ═══════════════════════════════════════════════════════════
-        
-        // Pattern 1: Plain JSON on new line or at end
-        let jsonMatch = fullText.match(/\{[^{}]*"score"[^{}]*\}/);
-        
-        // Pattern 2: Markdown-wrapped JSON (```json ... ```)
-        if (!jsonMatch) {
-          const mdMatch = fullText.match(/```json\s*(\{[^}]*"score"[^}]*\})\s*```/);
-          if (mdMatch) jsonMatch = [mdMatch[1]];
-        }
-        
-        // Pattern 3: JSON with newlines/whitespace
-        if (!jsonMatch) {
-          jsonMatch = fullText.match(/\{\s*"score"\s*:\s*\d+[^}]*\}/);
-        }
-
-        if (jsonMatch) {
-          try {
-            scoreData = JSON.parse(jsonMatch[0]);
-            
-            // Remove JSON from spoken text (all patterns)
-            aiText = fullText
-              .replace(/\{[^{}]*"score"[^{}]*\}/g, '')           // Plain JSON
-              .replace(/```json[\s\S]*?```/g, '')                // Markdown JSON
-              .replace(/\{\s*"score"\s*:\s*\d+[^}]*\}/g, '')    // Whitespace JSON
-              .replace(/\n\s*\n/g, '\n')                         // Double newlines
-              .trim();
-            
-            console.log(`[Claude API] ✅ Metadata extracted: Score ${scoreData.score}, Signal: ${scoreData.signal}`);
-            
-          } catch (e) {
-            console.warn('[Claude API] ⚠️  Could not parse score JSON:', jsonMatch[0].substring(0, 50));
-            // Still remove the malformed JSON from spoken text
-            aiText = fullText.replace(jsonMatch[0], '').trim();
-          }
-        } else {
-          console.warn('[Claude API] ⚠️  No score JSON found in response');
-        }
-
-        // ✅ RESPONSE MONITORING (no hard limits — Sonnet manages its own length via prompt)
+        // RESPONSE MONITORING
         const wordCount = aiText.split(/\s+/).filter(w => w).length;
         const endsWithQuestion = /\?['"]*\s*$/.test(aiText.trim());
         console.log(`[Claude API] ✅ Response: ${wordCount} words${endsWithQuestion ? ', ends with question' : ''}`);
 
-        // ═══════════════════════════════════════════════════════════
-        // SAVE TO CONVERSATION HISTORY (cleaned text only, NO JSON!)
-        // ═══════════════════════════════════════════════════════════
+        // Save to conversation history (pure text, no JSON ever)
         callData.conversationHistory.push({
           role: 'assistant',
-          content: aiText  // ✅ CLEANED TEXT (JSON removed!)
+          content: aiText
         });
 
-        if (scoreData && scoreData.score !== undefined) {
-          callData.intentScore = Math.min(100, Math.max(0, parseInt(scoreData.score)));
-          
-          // ✅ Track peak score
-          if (callData.intentScore > callData.intentScorePeak) {
-            callData.intentScorePeak = callData.intentScore;
-          }
-          
-          // ✅ Track engagement signals
-          if (callData.conversationHistory.length > 1) {
-            callData.engagementSignals.call_answered = true;
-            callData.engagementSignals.meaningful_conversation = true;
-          }
-          
-          // ✅ Extract signals
-          if (scoreData.signal) {
-            const signal = scoreData.signal.toLowerCase();
-            
-            if (callData.leadType === 'B2B') {
-              this._extractB2BSignals(signal, callData);
-            } else {
-              this._extractB2CSignals(signal, callData);
-            }
-            
-            if (signal.includes('question')) {
-              callData.engagementSignals.asked_questions = true;
-            }
-          }
-          
-          // ═══════════════════════════════════════════════════════════
-          // ZOHO REAL-TIME SCORE UPDATE (via Deluge function)
-          // ═══════════════════════════════════════════════════════════
-          if (callData.leadId && this.zoho.isEnabled()) {
-            let behaviourDelta = 0;
-            
-            if (scoreData.signal_type === 'engagement') {
-              behaviourDelta = 3;
-              callData.behaviourScoreDelta += 3;
-              callData.behaviourScore = Math.max(0, Math.min(100, callData.behaviourScore + 3));
-            } else if (scoreData.signal_type === 'positive') {
-              behaviourDelta = 5;
-              callData.behaviourScoreDelta += 5;
-              callData.behaviourScore = Math.max(0, Math.min(100, callData.behaviourScore + 5));
-            } else if (callData.conversationHistory.length > 2) {
-              behaviourDelta = 1;
-              callData.behaviourScoreDelta += 1;
-              callData.behaviourScore = Math.max(0, Math.min(100, callData.behaviourScore + 1));
-            }
-            
-            // ✅ Fire-and-forget live update
-            this.zoho.updateIntentScore(
-              callData.leadId,
-              callData.intentScore,
-              0
-            ).catch(err => {
-              console.error('[Twilio] Zoho live IntentScore update failed:', {
-                leadId: callData.leadId,
-                intentScore: callData.intentScore,
-                callSid: callData.callSid || 'unknown',
-                error: err.message
-              });
-            });
-          }
-        }
+        // P1: Update conversation state with what we learned this turn
+        this._updateConversationState(callData, userSpeech, aiText);
 
         return {
           text: aiText,
-          score: callData.intentScore,
-          signal: scoreData ? scoreData.signal : null,
-          signalType: scoreData ? scoreData.signal_type : null,
-          delta: scoreData ? scoreData.delta : null
+          score: callData.intentScore
         };
       }
 
@@ -698,7 +662,228 @@ class TwilioService {
         console.error(`[Claude API] ❌ Exception after ${elapsedTime}ms:`, error.message);
       }
       
+      clearTimeout(timeout);
       return null;
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // P1: BUILD STATE HEADER — Injected into prompt every turn
+  // Tells Sonnet exactly what's been covered so it NEVER repeats
+  // ═══════════════════════════════════════════════════════════
+  _buildStateHeader(callData) {
+    const state = callData.conversationState;
+    if (!state) return '';
+
+    const facts = state.known_facts || {};
+    const factLines = Object.entries(facts)
+      .map(([key, val]) => `- ${key}: ${val}`)
+      .join('\n');
+    
+    const askedLines = (state.asked_topics || [])
+      .map(t => `- ${t}`)
+      .join('\n');
+
+    return `═══════════════════════════════════════════
+CURRENT CALL STATE (DO NOT DISCOVER THESE AGAIN)
+═══════════════════════════════════════════
+KNOWN FACTS:
+${factLines || '- Nothing confirmed yet (first turn)'}
+
+TOPICS ALREADY ASKED ABOUT:
+${askedLines || '- None yet'}
+
+DO NOT re-ask about any known fact. Build on what you know. Advance the conversation forward.`;
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // P4: BUILD PACING MODIFIER — Adapts response style to prospect
+  // ═══════════════════════════════════════════════════════════
+  _buildPacingModifier(callData) {
+    const state = callData.conversationState;
+    if (!state) return '';
+
+    const wc = state.last_user_word_count || 0;
+    const energy = state.prospect_energy || 'unknown';
+
+    if (energy === 'brief' || wc < 5) {
+      return `[PACING: Prospect is giving short answers. Use a brief hook or statement, not open-ended questions. Keep your response under 15 words. Match their energy.]`;
+    } else if (energy === 'talkative' || wc > 30) {
+      return `[PACING: Prospect is highly engaged and talking. Use active listening ("Right", "Exactly", "I hear you"), validate their point, then ask ONE focused follow-up.]`;
+    } else if (energy === 'hostile') {
+      return `[PACING: Prospect sounds frustrated or hostile. Acknowledge their frustration immediately. Apologise if needed. Skip to the most actionable next step.]`;
+    }
+    return '';
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // P1: UPDATE CONVERSATION STATE — Track what we've learned
+  // ═══════════════════════════════════════════════════════════
+  _updateConversationState(callData, userSpeech, aiText) {
+    const state = callData.conversationState;
+    if (!state) return;
+
+    const lower = userSpeech.toLowerCase();
+
+    // Track known facts based on keywords in user speech
+    const factPatterns = [
+      { keys: ['financial freedom', 'make money', 'extra income', 'passive income', 'side income'], fact: 'goal', value: 'financial freedom / extra income' },
+      { keys: ['beginner', 'just starting', 'new to', 'never traded', 'don\'t know how'], fact: 'experience', value: 'beginner' },
+      { keys: ['been trading', 'already trade', 'some experience', 'traded before'], fact: 'experience', value: 'has some experience' },
+      { keys: ['busy', 'work', 'no time', 'demanding job'], fact: 'constraint', value: 'busy with work / limited time' },
+      { keys: ['scared', 'afraid', 'lose money', 'risky', 'scam'], fact: 'fear', value: 'fears losing money / trust concerns' },
+      { keys: ['burned', 'bad experience', 'lost money before', 'other broker'], fact: 'past_experience', value: 'bad experience with previous broker' },
+      { keys: ['whatsapp', 'email', 'call me'], fact: 'preferred_channel', value: lower.includes('whatsapp') ? 'WhatsApp' : lower.includes('email') ? 'Email' : 'Phone' },
+      { keys: ['200', '500', '1000', '5000', 'thousand', 'hundred'], fact: 'capital_mentioned', value: userSpeech.match(/[\$\u00a3\u20a6]?\d[\d,]*/)?.[0] || 'amount mentioned' },
+      { keys: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'tomorrow', 'next week', 'weekend'], fact: 'timeline', value: userSpeech.match(/monday|tuesday|wednesday|thursday|friday|tomorrow|next week|weekend/i)?.[0] || 'time mentioned' },
+    ];
+
+    for (const pattern of factPatterns) {
+      if (pattern.keys.some(k => lower.includes(k))) {
+        state.known_facts[pattern.fact] = pattern.value;
+      }
+    }
+
+    // Track what AI asked about (from AI's response)
+    const aiLower = aiText.toLowerCase();
+    const topicPatterns = [
+      { keys: ['what.*goal', 'what.*want', 'what.*looking for', 'what.*hoping'], topic: 'goals' },
+      { keys: ['experience', 'traded before', 'how long'], topic: 'experience' },
+      { keys: ['what.*stop', 'what.*holding', 'what.*blocking', 'what.*prevent'], topic: 'obstacles' },
+      { keys: ['how much', 'capital', 'invest', 'deposit', 'start with'], topic: 'capital' },
+      { keys: ['when.*start', 'timeline', 'thursday.*friday', 'this week'], topic: 'timeline' },
+      { keys: ['whatsapp.*email', 'best.*reach', 'best.*number'], topic: 'contact_preference' },
+    ];
+
+    for (const pattern of topicPatterns) {
+      if (pattern.keys.some(k => new RegExp(k, 'i').test(aiLower))) {
+        if (!state.asked_topics.includes(pattern.topic)) {
+          state.asked_topics.push(pattern.topic);
+        }
+      }
+    }
+
+    // Detect hostile/frustrated energy
+    const hostilePatterns = ['boring', 'bored', 'waste', 'annoying', 'stop asking', 'same question', 'already told you', 'said that'];
+    if (hostilePatterns.some(p => lower.includes(p))) {
+      state.prospect_energy = 'hostile';
+    }
+
+    console.log(`[State] Updated — Known: ${Object.keys(state.known_facts).length} facts, Asked: ${state.asked_topics.length} topics, Energy: ${state.prospect_energy}`);
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // P2: ASYNC SCORING — Fires Haiku in background, non-blocking
+  // Prospect never waits on analytics
+  // ═══════════════════════════════════════════════════════════
+  async _scoreConversationAsync(callData, userSpeech, aiText, wsServer) {
+    try {
+      const state = callData.conversationState || {};
+      const knownFacts = JSON.stringify(state.known_facts || {});
+      
+      const scoringPrompt = `You are an intent-scoring engine for a sales call. Based on the latest exchange, update the IntentScore.
+
+Current IntentScore: ${callData.intentScore}/100
+Known facts about prospect: ${knownFacts}
+Call phase: ${callData.intentScore < 30 ? 'Hook' : callData.intentScore < 60 ? 'Dream Amplification' : callData.intentScore < 75 ? 'Pain Discovery' : 'Solution Framing / SQL'}
+
+Scoring rules:
++4 to +8: Curiosity, follow-up questions
++8 to +12: Admits pain, shares personal situation
++10 to +15: Asks about process, platform, how it works
++12 to +18: Mentions capital, specific amounts
++15 to +20: Asks about next steps, ready to proceed
+-2 to -5: Dismissive, hostile, wants to hang up
+0: Neutral, monosyllabic
+
+Respond with ONLY this JSON, nothing else:
+{"score":<new_total>,"delta":<change>,"signal":"<short_label>","signal_type":"<pain|intent|buy|neutral>"}`;
+
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': this.anthropicApiKey,
+          'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify({
+          model: 'claude-haiku-4-5',
+          max_tokens: 80,
+          system: scoringPrompt,
+          messages: [
+            { role: 'user', content: `Prospect said: "${userSpeech}"\n\nSales rep replied: "${aiText}"\n\nScore this exchange. Return ONLY the JSON.` }
+          ]
+        })
+      });
+
+      if (!response.ok) {
+        console.error('[Scoring] ❌ Haiku scoring API error');
+        return;
+      }
+
+      const data = await response.json();
+      if (!data.content || !data.content[0]) return;
+
+      const scoreText = data.content[0].text || '';
+      const jsonMatch = scoreText.match(/\{[^{}]*"score"[^{}]*\}/);
+      
+      if (jsonMatch) {
+        const scoreData = JSON.parse(jsonMatch[0]);
+        const newScore = Math.min(100, Math.max(0, parseInt(scoreData.score)));
+        const oldScore = callData.intentScore;
+        callData.intentScore = newScore;
+
+        console.log(`[Scoring] ✅ Haiku scored: ${oldScore} → ${newScore} (${scoreData.signal})`);
+
+        // Track peak
+        if (newScore > callData.intentScorePeak) {
+          callData.intentScorePeak = newScore;
+        }
+
+        // Track engagement
+        if (callData.conversationHistory.length > 1) {
+          callData.engagementSignals.call_answered = true;
+          callData.engagementSignals.meaningful_conversation = true;
+        }
+
+        if (scoreData.signal) {
+          const signal = scoreData.signal.toLowerCase();
+          if (callData.leadType === 'B2B') {
+            this._extractB2BSignals(signal, callData);
+          } else {
+            this._extractB2CSignals(signal, callData);
+          }
+          if (signal.includes('question')) {
+            callData.engagementSignals.asked_questions = true;
+          }
+        }
+
+        // Broadcast score update to dashboard
+        if (wsServer) {
+          const signals = [];
+          if (scoreData.signal) {
+            signals.push({
+              type: scoreData.signal_type || 'neutral',
+              label: scoreData.signal,
+              delta: scoreData.delta || 0
+            });
+          }
+          wsServer.broadcast({
+            type: 'callUpdate',
+            callSid: callData.callSid,
+            intentScore: newScore,
+            signals
+          });
+        }
+
+        // Update Zoho
+        if (callData.leadId && this.zoho.isEnabled()) {
+          this.zoho.updateIntentScore(callData.leadId, newScore, 0)
+            .catch(err => console.error('[Scoring] Zoho update failed:', err.message));
+        }
+      }
+    } catch (error) {
+      console.error('[Scoring] ❌ Async scoring error:', error.message);
     }
   }
 
@@ -712,10 +897,10 @@ class TwilioService {
     // WHY: 25-word ceiling removed. Sonnet generates 2-3 natural sentences (~40-60 words)
     // plus JSON scoring block (~30 tokens). These limits prevent rambling while allowing flow.
     if (callData.leadType === 'B2C') {
-      if (intentScore < 30) return 200;  // Cold: Discovery + rapport building
-      if (intentScore < 60) return 250;  // Warm: Deeper conversation + proof points
-      if (intentScore < 75) return 300;  // Hot: Objection handling needs room
-      return 250;  // SQL: Clean close + logistics
+      if (intentScore < 30) return 150;  // Cold: 2-3 sentences, no JSON needed
+      if (intentScore < 60) return 180;  // Warm: Slightly longer for rapport
+      if (intentScore < 75) return 220;  // Hot: Objection handling needs room
+      return 180;  // SQL: Clean close + logistics
     }
 
     // B2B: Allow longer responses (existing logic)
@@ -742,8 +927,8 @@ class TwilioService {
       console.log('[Twilio] 🎯 Using B2B prompt (Sales360 client acquisition)');
       return this._buildB2BPrompt(callData);
     } else if (leadType === 'B2C') {
-      // ✅ SALES360 MASTER PROMPT V2 - Haiku-Optimised (674 tokens, fast!)
-      console.log('[Twilio] 🎯 Using SALES360 MASTER PROMPT V2 (Haiku-Optimised)');
+      // SALES360 MASTER PROMPT V3 — Sonnet-Powered
+      console.log('[Twilio] 🎯 Using SALES360 MASTER PROMPT V3 (Sonnet-Powered)');
 
       const regionMap = {
         'Nigeria': 'nigeria',

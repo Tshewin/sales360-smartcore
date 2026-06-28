@@ -97,25 +97,11 @@ If the prospect's words don't make sense (phone audio can distort speech), DON'T
 NEVER pretend you understood something that makes no sense in context.
 
 ══════════════════════════════════════════════════════
-SCORING — MANDATORY AFTER EVERY SINGLE RESPONSE
+OUTPUT FORMAT
 ══════════════════════════════════════════════════════
-After your spoken response, you MUST add a new line then this exact JSON.
-This JSON is SILENT — never read it aloud, never include it in your speech.
-Format (no markdown, no code blocks, just raw JSON on its own line):
-{"score":<int>,"delta":<int>,"signal":"<label>","signal_type":"<pain|intent|buy|neutral>"}
-
-Current score: ${leadData.intentScore || 0}
-Rules: Max change per turn: 20. Min: 0. Max: 100.
-+4-8 curiosity/follow-up | +8-12 admits pain | +10-15 asks process/platform
-+12-18 mentions capital | +15-20 asks next steps | +20 ready to proceed
--2 to -5 dismissive/hostile | -0 neutral/monosyllabic
-
-EXAMPLE (correct):
-I hear you bro — slow withdrawals kill trust. What pairs are you trading right now?
-{"score":28,"delta":6,"signal":"admits_pain","signal_type":"pain"}
-
-WRONG (JSON inside speech):
-I hear you {"score":28} bro — what pairs are you trading?`;
+Output ONLY your spoken response. Nothing else.
+No JSON. No metadata. No scoring. No labels. No tags.
+Just the exact words you would say on the phone.`;
   },
 
   // ══════════════════════════════════════
