@@ -57,12 +57,62 @@ class TwilioService {
       console.log('[Twilio Service] ⚠️  No Zoho service provided, creating new instance');
       this.zoho = new ZohoService();
     }
+
+    // ═══════════════════════════════════════════════════════════
+    // PRE-CACHED FALLBACK AUDIO (Chuks's cloned voice)
+    // NO system voices should EVER reach the prospect
+    // ═══════════════════════════════════════════════════════════
+    this.fallbackAudioUrls = new Map();
+    this.fallbackMessages = {
+      'bad_line': "Sorry, the line broke up for a second. Could you say that again?",
+      'still_there_1': "Hey, are you still there? I think the line might have dropped for a second.",
+      'still_there_2': "Hello? Can you hear me? Just want to make sure we're still connected.",
+      'bad_connection_end': "Looks like we've got a bad connection. Let me try you again in a few minutes. Take care!",
+      'busy_callback': "No worries at all! I'll give you a call back in about 30 minutes. Have a great day!",
+      'natural_signoff': "Sorry about that, let me call you right back. Talk in a moment!",
+      'error_recovery': "Apologies, give me one second. Actually, let me call you right back so we get a clean line."
+    };
+    this._preloadFallbackAudio();
     
     console.log('[Twilio Service] ✅ Initialized with number:', this.phoneNumber);
     console.log('[Twilio Service] Anthropic API Key:', this.anthropicApiKey ? `YES (length: ${this.anthropicApiKey.length})` : '❌ MISSING!');
     console.log('[Twilio Service] ElevenLabs:', this.elevenLabs.isReady() ? '✅ Ready' : '⚠️  Disabled');
     console.log('[Twilio Service] Storage: ✅ Ready (3-tier fallback: R2 → Volume → Direct)');
     console.log('[Twilio Service] Zoho CRM:', this.zoho.isEnabled() ? '✅ Connected' : '⚠️  Disabled');
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // FALLBACK AUDIO — Pre-generate with cloned voice
+  // Prospect should NEVER hear a system voice or error message
+  // ═══════════════════════════════════════════════════════════
+  async _preloadFallbackAudio() {
+    console.log('[Fallback Audio] 🎯 Pre-generating fallback messages with cloned voice...');
+    for (const [key, text] of Object.entries(this.fallbackMessages)) {
+      try {
+        const region = 'nigeria';
+        const audioBuffer = await this.elevenLabs.generateSpeech(text, region);
+        if (audioBuffer) {
+          const storageResult = await this.storage.smartUpload(audioBuffer, `fallback_${key}`);
+          const url = storageResult.url || storageResult;
+          this.fallbackAudioUrls.set(key, url);
+          console.log(`[Fallback Audio] ✅ Cached: ${key}`);
+        }
+      } catch (error) {
+        console.error(`[Fallback Audio] ⚠️  Failed to cache ${key}:`, error.message);
+      }
+    }
+    console.log(`[Fallback Audio] 📦 ${this.fallbackAudioUrls.size}/${Object.keys(this.fallbackMessages).length} messages cached`);
+  }
+
+  _playFallback(twiml, messageKey) {
+    const cachedUrl = this.fallbackAudioUrls.get(messageKey);
+    if (cachedUrl) {
+      twiml.play(cachedUrl);
+    } else {
+      const text = this.fallbackMessages[messageKey] || "Sorry, give me one moment.";
+      twiml.say({ voice: 'Polly.Matthew-Neural', language: 'en-GB' }, text);
+      console.log(`[Fallback Audio] ⚠️  Polly fallback for: ${messageKey}`);
+    }
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -433,11 +483,26 @@ class TwilioService {
       
     } catch (error) {
       console.error(`[Twilio Async] ❌ Error generating response:`, error);
+      
+      // ═══════════════════════════════════════════════════════════
+      // TIMEOUT/ERROR FALLBACK — Play natural recovery instead of silence
+      // The prospect should hear "sorry, bad connection" NOT dead air
+      // ═══════════════════════════════════════════════════════════
+      const fallbackUrl = this.fallbackAudioUrls.get('error_recovery');
+      
       this.pendingResponses.set(callSid, {
         error: error.message,
         timestamp: Date.now(),
-        success: false
+        success: false,
+        audioUrl: fallbackUrl || null,  // Wait endpoint can play this instead of silence
+        fallbackMessage: this.fallbackMessages['error_recovery']  // Text fallback if no cached audio
       });
+
+      // Track that this call had a timeout — affects retry logic
+      const callData_err = this.activeCalls.get(callSid);
+      if (callData_err) {
+        callData_err.callEndReason = 'ai_timeout';
+      }
     }
   }
 
@@ -450,7 +515,7 @@ class TwilioService {
     const callData = this.activeCalls.get(callSid);
     if (!callData) {
       console.error('[Twilio Webhook] Call data not found for:', callSid);
-      twiml.say({ voice: 'Polly.Matthew' }, 'I apologize, there was an error. Goodbye.');
+      this._playFallback(twiml, 'error_recovery');
       twiml.hangup();
       return twiml.toString();
     }
@@ -463,10 +528,7 @@ class TwilioService {
       if (silenceCount >= (callData_silence?.maxSilenceRetries || 2)) {
         // Max retries exhausted — end call gracefully
         console.log(`[Twilio] 🔇 Max silence retries (${silenceCount}) reached — ending call`);
-        twiml.say({
-          voice: 'Polly.Matthew',
-          language: 'en-GB'
-        }, "Looks like we might have a bad connection. I'll try you again a bit later. Take care!");
+        this._playFallback(twiml, 'bad_connection_end');
         twiml.hangup();
         
         if (callData_silence) {
@@ -489,10 +551,8 @@ class TwilioService {
       
       console.log(`[Twilio] 🔇 No speech detected — retry ${silenceCount + 1}/${callData_silence?.maxSilenceRetries || 2}`);
       
-      twiml.say({
-        voice: 'Polly.Matthew',
-        language: 'en-GB'
-      }, message);
+      const fallbackKey = silenceCount === 0 ? 'still_there_1' : 'still_there_2';
+      this._playFallback(twiml, fallbackKey);
       
       const gather = twiml.gather({
         input: 'speech',
@@ -553,10 +613,7 @@ class TwilioService {
         callData.callbackRequested = true;
         callData.callEndReason = 'prospect_busy';
       }
-      twiml.say({
-        voice: 'Polly.Matthew',
-        language: 'en-GB'
-      }, "No worries at all! I'll give you a call back in about 30 minutes. Have a great day!");
+      this._playFallback(twiml, 'busy_callback');
       twiml.hangup();
       return twiml.toString();
     }
@@ -571,10 +628,7 @@ class TwilioService {
       
       if (!isRecognisable) {
         console.log(`[Twilio] 🔇 Garbled speech intercepted: "${speechResult}"`);
-        twiml.say({
-          voice: 'Polly.Matthew',
-          language: 'en-GB'
-        }, "Sorry, the line broke up for a second. Could you say that again?");
+        this._playFallback(twiml, 'bad_line');
         const gather = twiml.gather({
           input: 'speech',
           action: `${this.webhookBaseUrl}/twilio/gather`,
@@ -828,23 +882,28 @@ DO NOT re-ask about any known fact. Build on what you know. Advance the conversa
       const state = callData.conversationState || {};
       const knownFacts = JSON.stringify(state.known_facts || {});
       
-      const scoringPrompt = `You are an intent-scoring engine for a sales call. Based on the latest exchange, update the IntentScore.
+      const scoringPrompt = `You are a sales call scoring engine. Calculate the new IntentScore after this exchange.
 
-Current IntentScore: ${callData.intentScore}/100
-Known facts about prospect: ${knownFacts}
-Call phase: ${callData.intentScore < 30 ? 'Hook' : callData.intentScore < 60 ? 'Dream Amplification' : callData.intentScore < 75 ? 'Pain Discovery' : 'Solution Framing / SQL'}
+CURRENT SCORE: ${callData.intentScore}
+PROSPECT FACTS: ${knownFacts}
 
-Scoring rules:
-+4 to +8: Curiosity, follow-up questions
-+8 to +12: Admits pain, shares personal situation
-+10 to +15: Asks about process, platform, how it works
-+12 to +18: Mentions capital, specific amounts
-+15 to +20: Asks about next steps, ready to proceed
--2 to -5: Dismissive, hostile, wants to hang up
-0: Neutral, monosyllabic
+SCORING GUIDE (how much to ADD or SUBTRACT from current score):
+- Prospect shows curiosity or asks follow-up: add 4 to 8 points
+- Prospect admits a problem or shares personal situation: add 8 to 12 points  
+- Prospect asks about process or how it works: add 10 to 15 points
+- Prospect mentions money or capital amounts: add 12 to 18 points
+- Prospect asks about next steps or is ready to proceed: add 15 to 20 points
+- Prospect is dismissive or hostile: subtract 2 to 5 points
+- Prospect gives neutral one-word answer: add 0 points
 
-Respond with ONLY this JSON, nothing else:
-{"score":<new_total>,"delta":<change>,"signal":"<short_label>","signal_type":"<pain|intent|buy|neutral>"}`;
+CRITICAL RULES:
+1. Calculate the FINAL score yourself. Example: if current score is 4 and you add 8, output 12. NOT "4+8".
+2. The "score" field must be a single integer. NOT a formula. NOT an expression. Just one number.
+3. Score must be between 0 and 100.
+4. Output ONLY valid JSON. Nothing else. No explanation.
+
+FORMAT (output exactly this, replacing values with actual numbers):
+{"score":12,"delta":8,"signal":"admits_pain","signal_type":"pain"}`;
 
       const response = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
@@ -858,7 +917,7 @@ Respond with ONLY this JSON, nothing else:
           max_tokens: 80,
           system: scoringPrompt,
           messages: [
-            { role: 'user', content: `Prospect said: "${userSpeech}"\n\nSales rep replied: "${aiText}"\n\nScore this exchange. Return ONLY the JSON.` }
+            { role: 'user', content: `Prospect: "${userSpeech}"\nSales rep: "${aiText}"\n\nReturn the JSON score now.` }
           ]
         })
       });
@@ -1270,13 +1329,15 @@ OPENING: "${opening}"`;
         const isIncomplete = duration < 90 && turnCount < 3;
         const wasBusy = callData.callbackRequested === true;
         const wasSilenceTimeout = callData.callEndReason === 'silence_timeout';
+        const wasAiTimeout = callData.callEndReason === 'ai_timeout';
 
-        if ((isIncomplete || wasBusy || wasSilenceTimeout) && retryCount < maxRetries) {
-          const retryDelayMs = wasBusy ? 30 * 60 * 1000 : 15 * 60 * 1000; // 30 min if busy, 15 min if dropped
+        if ((isIncomplete || wasBusy || wasSilenceTimeout || wasAiTimeout) && retryCount < maxRetries) {
+          const retryDelayMs = wasBusy ? 30 * 60 * 1000 : 15 * 60 * 1000;
           const retryDelayMins = Math.round(retryDelayMs / 60000);
+          const reason = wasBusy ? 'prospect_busy' : wasSilenceTimeout ? 'silence_timeout' : wasAiTimeout ? 'ai_timeout' : 'incomplete_call';
           
           console.log(`[Call Completion] 🔄 Scheduling retry #${retryCount + 1} in ${retryDelayMins} mins`);
-          console.log(`[Call Completion]    Reason: ${wasBusy ? 'prospect_busy' : wasSilenceTimeout ? 'silence_timeout' : 'incomplete_call'}`);
+          console.log(`[Call Completion]    Reason: ${reason}`);
           console.log(`[Call Completion]    Duration: ${duration}s, Turns: ${turnCount}, Retries: ${retryCount}/${maxRetries}`);
 
           this._scheduleRetryCall(callData, retryDelayMs, retryCount + 1);
