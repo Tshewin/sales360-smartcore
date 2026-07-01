@@ -241,7 +241,7 @@ function setupCallRoutes(wsServer, twilioService, elevenLabsService) {
           input: 'speech',
           action: `${process.env.WEBHOOK_BASE_URL}/twilio/gather`,
           method: 'POST',
-          speechTimeout: 'auto',
+          speechTimeout: 2,
           speechModel: 'phone_call',
           enhanced: true,
           language: 'en-GB'
@@ -288,7 +288,7 @@ function setupCallRoutes(wsServer, twilioService, elevenLabsService) {
           action: `${process.env.WEBHOOK_BASE_URL}/twilio/gather`,
           method: 'POST',
           timeout: 60,
-          speechTimeout: 'auto',
+          speechTimeout: 2,
           speechModel: 'phone_call',
           enhanced: true,
           language: 'en-GB'
@@ -316,7 +316,7 @@ function setupCallRoutes(wsServer, twilioService, elevenLabsService) {
           action: `${process.env.WEBHOOK_BASE_URL}/twilio/gather`,
           method: 'POST',
           timeout: 60,
-          speechTimeout: 'auto',
+          speechTimeout: 2,
           speechModel: 'phone_call',
           enhanced: true,
           language: 'en-GB'

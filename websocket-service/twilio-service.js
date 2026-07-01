@@ -70,8 +70,16 @@ class TwilioService {
       'bad_connection_end': "Looks like we've got a bad connection. Let me try you again in a few minutes. Take care!",
       'busy_callback': "No worries at all! I'll give you a call back in about 30 minutes. Have a great day!",
       'natural_signoff': "Sorry about that, let me call you right back. Talk in a moment!",
-      'error_recovery': "Apologies, give me one second. Actually, let me call you right back so we get a clean line."
+      'error_recovery': "Apologies, give me one second. Actually, let me call you right back so we get a clean line.",
+      // FILLER PHRASES — played instantly while Claude thinks
+      'filler_1': "Mmhmm...",
+      'filler_2': "Right...",
+      'filler_3': "I hear you...",
+      'filler_4': "Okay...",
+      'filler_5': "Yeah..."
     };
+    this._fillerKeys = ['filler_1', 'filler_2', 'filler_3', 'filler_4', 'filler_5'];
+    this._lastFillerIndex = -1;
     this._preloadFallbackAudio();
     
     console.log('[Twilio Service] ✅ Initialized with number:', this.phoneNumber);
@@ -113,6 +121,20 @@ class TwilioService {
       twiml.say({ voice: 'Polly.Matthew-Neural', language: 'en-GB' }, text);
       console.log(`[Fallback Audio] ⚠️  Polly fallback for: ${messageKey}`);
     }
+  }
+
+  // Get a random filler URL (never repeats the same filler twice in a row)
+  _getRandomFiller() {
+    if (!this._fillerKeys || this._fillerKeys.length === 0) return null;
+    
+    let idx;
+    do {
+      idx = Math.floor(Math.random() * this._fillerKeys.length);
+    } while (idx === this._lastFillerIndex && this._fillerKeys.length > 1);
+    
+    this._lastFillerIndex = idx;
+    const key = this._fillerKeys[idx];
+    return this.fallbackAudioUrls.get(key) || null;
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -392,7 +414,7 @@ class TwilioService {
     }
 
     // Continue with speech gathering — tuned for Nigerian/African English cadence
-    // speechTimeout: 3 = wait 3 seconds of silence before treating speech as complete
+    // speechTimeout: 2 = wait 2 seconds of silence before treating speech as complete
     //   WHY NOT 'auto': Twilio's auto detection cuts off mid-sentence for Nigerian English
     //   WHY NOT 1: Too aggressive, fragments like "right now I" get submitted incomplete
     //   WHY 3: Matches natural pause length in Nigerian conversational speech
@@ -402,7 +424,7 @@ class TwilioService {
       action: `${this.webhookBaseUrl}/twilio/gather`,
       method: 'POST',
       timeout: 15,
-      speechTimeout: 3,              // ✅ FIX: Explicit 3s silence threshold (was 'auto')
+      speechTimeout: 2,              // ✅ FIX: Explicit 2s silence threshold (was 'auto')
       speechModel: 'phone_call',
       enhanced: true,
       language: 'en-GB'
@@ -559,7 +581,7 @@ class TwilioService {
         action: `${this.webhookBaseUrl}/twilio/gather`,
         method: 'POST',
         timeout: 10,
-        speechTimeout: 3,
+        speechTimeout: 2,
         speechModel: 'phone_call',
         enhanced: true,
         language: 'en-GB'
@@ -634,7 +656,7 @@ class TwilioService {
           action: `${this.webhookBaseUrl}/twilio/gather`,
           method: 'POST',
           timeout: 15,
-          speechTimeout: 3,
+          speechTimeout: 2,
           speechModel: 'phone_call',
           enhanced: true,
           language: 'en-GB'
@@ -660,7 +682,18 @@ class TwilioService {
     // ⚡ ASYNC PATTERN: Start generating response in BACKGROUND (don't await!)
     this.generateResponseAsync(callSid, speechResult, wsServer);
     
-    // Return IMMEDIATELY with redirect to wait endpoint
+    // ═══════════════════════════════════════════════════════════
+    // FILLER PHRASE — Instant perceived response while Claude thinks
+    // Real salespeople say "Mmhmm", "Right", "I hear you" while processing
+    // This plays in <100ms, giving Claude a 0.5s head start
+    // ═══════════════════════════════════════════════════════════
+    const fillerUrl = this._getRandomFiller();
+    if (fillerUrl) {
+      twiml.play(fillerUrl);
+      console.log(`[Twilio] 🎯 Filler played — Claude gets head start`);
+    }
+    
+    // Return with redirect to wait endpoint
     console.log(`[Twilio Webhook] ⚡ Redirecting to wait endpoint (async mode)`);
     twiml.redirect({
       method: 'POST'
