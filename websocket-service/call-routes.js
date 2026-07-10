@@ -232,16 +232,22 @@ function setupCallRoutes(wsServer, twilioService, elevenLabsService) {
         const VoiceResponse = require('twilio').twiml.VoiceResponse;
         const twiml = new VoiceResponse();
         
-        twiml.say({
-          voice: 'Polly.Matthew',
-          language: 'en-GB'
-        }, "I didn't catch that. Could you please repeat?");
+        // Use cloned voice fallback instead of system voice
+        const fallbackUrl = twilioService.fallbackAudioUrls ? twilioService.fallbackAudioUrls.get('bad_line') : null;
+        if (fallbackUrl) {
+          twiml.play(fallbackUrl);
+        } else {
+          twiml.say({
+            voice: 'Polly.Matthew-Neural',
+            language: 'en-GB'
+          }, "Sorry, could you say that again?");
+        }
         
         const gather = twiml.gather({
           input: 'speech',
           action: `${process.env.WEBHOOK_BASE_URL}/twilio/gather`,
           method: 'POST',
-          speechTimeout: 2,
+          speechTimeout: 'auto',
           speechModel: 'phone_call',
           enhanced: true,
           language: 'en-GB'
@@ -288,7 +294,7 @@ function setupCallRoutes(wsServer, twilioService, elevenLabsService) {
           action: `${process.env.WEBHOOK_BASE_URL}/twilio/gather`,
           method: 'POST',
           timeout: 60,
-          speechTimeout: 2,
+          speechTimeout: 'auto',
           speechModel: 'phone_call',
           enhanced: true,
           language: 'en-GB'
@@ -309,14 +315,24 @@ function setupCallRoutes(wsServer, twilioService, elevenLabsService) {
       } else if (pendingResponse && !pendingResponse.success) {
         // ❌ Error occurred
         console.error(`[Twilio Wait] ❌ Error for ${callSid}:`, pendingResponse.error);
-        twiml.say("I apologize, I'm having trouble right now. Let me try again.");
+        // Use cloned voice fallback — NEVER expose "system error" to prospect
+        if (pendingResponse.audioUrl) {
+          twiml.play(pendingResponse.audioUrl);
+        } else {
+          const errorFallback = twilioService.fallbackAudioUrls ? twilioService.fallbackAudioUrls.get('error_recovery') : null;
+          if (errorFallback) {
+            twiml.play(errorFallback);
+          } else {
+            twiml.say({ voice: 'Polly.Matthew-Neural', language: 'en-GB' }, "Sorry, give me one second. Let me try that again.");
+          }
+        }
         
         const gather = twiml.gather({
           input: 'speech',
           action: `${process.env.WEBHOOK_BASE_URL}/twilio/gather`,
           method: 'POST',
           timeout: 60,
-          speechTimeout: 2,
+          speechTimeout: 'auto',
           speechModel: 'phone_call',
           enhanced: true,
           language: 'en-GB'
@@ -341,7 +357,12 @@ function setupCallRoutes(wsServer, twilioService, elevenLabsService) {
       console.error('[Twilio Wait] Error:', error);
       const VoiceResponse = require('twilio').twiml.VoiceResponse;
       const twiml = new VoiceResponse();
-      twiml.say("I apologize, there was an error. Please try again.");
+      const errorUrl = twilioService.fallbackAudioUrls ? twilioService.fallbackAudioUrls.get('natural_signoff') : null;
+      if (errorUrl) {
+        twiml.play(errorUrl);
+      } else {
+        twiml.say({ voice: 'Polly.Matthew-Neural', language: 'en-GB' }, "Sorry about that, let me call you right back.");
+      }
       twiml.hangup();
       res.type('text/xml');
       res.send(twiml.toString());
