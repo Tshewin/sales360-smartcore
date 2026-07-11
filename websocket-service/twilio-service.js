@@ -14,7 +14,8 @@ const ZohoService = require('./zoho-service');
 const ChuksMethodology = require('./CHUKS-METHODOLOGY-V2');
 const RegionalCalibration = require('./REGIONAL-CALIBRATION');
 
-// ✅ SALES360 MASTER PROMPT V2: Haiku-Optimised, 674 tokens, 24 rules compressed
+// ✅ SALES360 MASTER PROMPT V3: Sonnet-Powered | Scoring decoupled to async Haiku
+// Sprint 1: History trimmed to 4 msgs | R2 eliminated from call loop | Context fillers
 const { Sales360MasterPromptV2 } = require('./SALES360-MASTER-PROMPT-V2');
 
 class TwilioService {
@@ -37,6 +38,11 @@ class TwilioService {
     
     // ⚡ OPTIMIZATION: Greeting cache (avoid regenerating same audio)
     this.greetingCache = new Map();
+
+    // ✅ SPRINT 1: In-memory audio cache — eliminates R2 from live call loop
+    // Saves 130-495ms per turn. Audio served directly from Node.js memory.
+    // R2 still used for post-call archival (async, non-blocking).
+    this.audioCache = new Map();
     
     // Use provided ElevenLabs service OR create new one
     if (elevenLabsService) {
@@ -98,9 +104,11 @@ class TwilioService {
     for (const [key, text] of Object.entries(this.fallbackMessages)) {
       try {
         const region = 'nigeria';
-        const audioBuffer = await this.elevenLabs.generateSpeech(text, region);
+        // ✅ FIX: Method is generateAudio, not generateSpeech
+        const audioBuffer = await this.elevenLabs.generateAudio(text, region, 'Male');
         if (audioBuffer) {
-          const storageResult = await this.storage.smartUpload(audioBuffer, `fallback_${key}`);
+          // ✅ FIX: Method is uploadAudio, not smartUpload
+          const storageResult = await this.storage.uploadAudio(audioBuffer, `fallback_${key}`);
           const url = storageResult.url || storageResult;
           this.fallbackAudioUrls.set(key, url);
           console.log(`[Fallback Audio] ✅ Cached: ${key}`);
@@ -123,18 +131,41 @@ class TwilioService {
     }
   }
 
-  // Get a random filler URL (never repeats the same filler twice in a row)
-  _getRandomFiller() {
+  // ✅ SPRINT 1: Context-sensitive filler selection (replaces random selection)
+  // Prevents semantically wrong fillers like "Yeah..." after "I've lost money"
+  _getContextFiller(userSpeech) {
     if (!this._fillerKeys || this._fillerKeys.length === 0) return null;
-    
-    let idx;
-    do {
-      idx = Math.floor(Math.random() * this._fillerKeys.length);
-    } while (idx === this._lastFillerIndex && this._fillerKeys.length > 1);
-    
-    this._lastFillerIndex = idx;
-    const key = this._fillerKeys[idx];
-    return this.fallbackAudioUrls.get(key) || null;
+    if (!userSpeech) return this.fallbackAudioUrls.get('filler_3') || null; // "I hear you..."
+
+    const lower = userSpeech.toLowerCase();
+
+    // Negative/pain context → empathetic filler
+    if (/\b(lost|scam|burned|worried|afraid|problem|struggling|frustrated|scared)\b/.test(lower)) {
+      return this.fallbackAudioUrls.get('filler_3') || null; // "I hear you..."
+    }
+
+    // Agreement/affirmation → confirming filler
+    if (/\b(yes|exactly|correct|that is right|absolutely|definitely)\b/.test(lower)) {
+      return this.fallbackAudioUrls.get('filler_2') || null; // "Right..."
+    }
+
+    // Long response (20+ words) → active listening
+    if (userSpeech.trim().split(/\s+/).length > 20) {
+      return this.fallbackAudioUrls.get('filler_1') || null; // "Mmhmm..."
+    }
+
+    // Short responses (1-3 words) → no filler (sounds synthetic on quick replies)
+    if (userSpeech.trim().split(/\s+/).length <= 3) {
+      return null;
+    }
+
+    // Default — use "Okay..." for neutral context
+    return this.fallbackAudioUrls.get('filler_4') || null; // "Okay..."
+  }
+
+  // Legacy method name for backward compatibility
+  _getRandomFiller() {
+    return this._getContextFiller(null);
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -486,13 +517,19 @@ class TwilioService {
         throw new Error('Audio generation failed');
       }
 
-      // ✅ NEW STORAGE SERVICE: Extract URL from response object
-      const storageResult = await this.storage.uploadAudio(audioBuffer, 'response');
-      const audioUrl = storageResult.url || storageResult;
+      // ✅ SPRINT 1: Serve audio from memory (eliminates R2 round-trip, saves 130-495ms)
+      const audioUrl = this._storeTemporaryAudio(audioBuffer, callSid);
       
-      const elapsedTime = Date.now() - startTime;
+      const t7 = Date.now();
+      const elapsedTime = t7 - startTime;
       console.log(`[Twilio Async] ✅ Response ready in ${elapsedTime}ms`);
-      console.log(`[Twilio Async] 🎵 Audio URL: ${audioUrl}`);
+      console.log(`[Twilio Async] 🎵 Audio URL (in-memory): ${audioUrl}`);
+      console.log(`[Latency t7] 📊 Audio available at ${t7} (${elapsedTime}ms from t0)`);
+      
+      // Archive to R2 asynchronously — doesn't block the call
+      this.storage.uploadAudio(audioBuffer, 'response')
+        .then(r => console.log(`[R2 Archive] ✅ Archived: ${r.url || r}`))
+        .catch(e => console.warn(`[R2 Archive] ⚠️ Archive failed (non-critical): ${e.message}`));
       
       // Store the ready response
       this.pendingResponses.set(callSid, {
@@ -683,14 +720,16 @@ class TwilioService {
     this.generateResponseAsync(callSid, speechResult, wsServer);
     
     // ═══════════════════════════════════════════════════════════
-    // FILLER PHRASE — Instant perceived response while Claude thinks
-    // Real salespeople say "Mmhmm", "Right", "I hear you" while processing
-    // This plays in <100ms, giving Claude a 0.5s head start
+    // FILLER PHRASE — Context-sensitive (Sprint 1)
+    // Matches filler to prospect's emotional context
+    // Skips filler on very short replies to avoid sounding synthetic
     // ═══════════════════════════════════════════════════════════
-    const fillerUrl = this._getRandomFiller();
+    const fillerUrl = this._getContextFiller(speechResult);
     if (fillerUrl) {
       twiml.play(fillerUrl);
-      console.log(`[Twilio] 🎯 Filler played — Claude gets head start`);
+      console.log(`[Twilio] 🎯 Context filler played — Claude gets head start`);
+    } else {
+      console.log(`[Twilio] ⏭️  No filler (short reply or no match)`);
     }
     
     // Return with redirect to wait endpoint
@@ -735,6 +774,11 @@ class TwilioService {
       const modelToUse = 'claude-sonnet-4-6';
       console.log(`[Claude API] 📊 Model: ${modelToUse}`);
 
+      // ✅ SPRINT 1: Send only last 4 messages to Claude (state header carries full context)
+      // Full history is preserved in callData.conversationHistory for audit/Zoho writeback
+      const recentMessages = callData.conversationHistory.slice(-4);
+      console.log(`[Claude API] 📋 Sending ${recentMessages.length} of ${callData.conversationHistory.length} messages (state header has full context)`);
+
       const response = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: {
@@ -746,7 +790,7 @@ class TwilioService {
           model: modelToUse,
           max_tokens: maxTokens,
           system: systemPrompt,
-          messages: callData.conversationHistory
+          messages: recentMessages
         }),
         signal: controller.signal
       });
@@ -1032,14 +1076,15 @@ FORMAT (output exactly this, replacing values with actual numbers):
     const userWordCount = userSpeech.split(' ').length;
     const intentScore = callData.intentScore || 0;
 
-    // ✅ B2C: SONNET NEEDS MORE ROOM FOR NATURAL CONVERSATION
-    // WHY: 25-word ceiling removed. Sonnet generates 2-3 natural sentences (~40-60 words)
-    // plus JSON scoring block (~30 tokens). These limits prevent rambling while allowing flow.
+    // ✅ SPRINT 1: Tightened B2C token budgets (JSON scoring removed — no longer need +30 tokens)
+    // Data shows: every 10 extra words ≈ +400ms Claude latency
+    // Sprint 2 will introduce move-based budgets via next_best_action
     if (callData.leadType === 'B2C') {
-      if (intentScore < 30) return 150;  // Cold: 2-3 sentences, no JSON needed
-      if (intentScore < 60) return 180;  // Warm: Slightly longer for rapport
-      if (intentScore < 75) return 220;  // Hot: Objection handling needs room
-      return 180;  // SQL: Clean close + logistics
+      if (userWordCount <= 3) return 35;     // Short reply: quick acknowledgement
+      if (intentScore < 30) return 65;       // Cold: tight discovery question
+      if (intentScore < 60) return 65;       // Warm: probe + one question
+      if (intentScore < 75) return 75;       // Hot: objection handling needs room
+      return 60;                              // SQL: clean close + logistics
     }
 
     // B2B: Allow longer responses (existing logic)
@@ -1164,10 +1209,8 @@ ${prospectName} is part of a larger organization with a team. Focus on:
 - INTEGRATION (fits existing CRM/tech stack)
 - ENTERPRISE VALUE (compliance, reporting, analytics)`}
 
-After EVERY response, append JSON:
-{"score":<integer>,"delta":<integer>,"signal":"<short label>","signal_type":"<pain|intent|buy|neutral>"}
-
 Start: ${zohoLead ? zohoLead.intentScore : 28}. Max change: 20.`;
+// ✅ SPRINT 1: JSON scoring instructions removed — scoring is decoupled to async Haiku (P2)
 
     return prompt;
   }
@@ -1176,12 +1219,12 @@ Start: ${zohoLead ? zohoLead.intentScore : 28}. Max change: 20.`;
   // B2C PROMPT (Legacy - kept for compatibility)
   // ═══════════════════════════════════════════════════════════
   _buildB2CPrompt(prospectName, callType, region, zohoLead) {
+    // ✅ SPRINT 1: JSON scoring instructions removed — scoring is decoupled to async Haiku (P2)
     return `You are an AI sales assistant for a forex brokerage calling ${prospectName}.
     
-After EVERY response, append JSON:
-{"score":<integer>,"delta":<integer>,"signal":"<short label>","signal_type":"<pain|intent|buy|neutral>"}
+Keep responses to 2-3 short sentences. Sound natural and professional on a phone call.
 
-Start: ${zohoLead ? zohoLead.intentScore : 22}. Max change: 20.`;
+Start score: ${zohoLead ? zohoLead.intentScore : 22}.`;
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -1234,12 +1277,49 @@ ${crmContext}
 CALL TYPE: ${leadType}
 EXPERIENCE: ${experience}
 
-After EVERY response, append JSON:
-{"score":<integer>,"delta":<integer>,"signal":"<short label>","signal_type":"<pain|intent|buy|neutral>"}
-
-Start: ${startScore}. Max change: 20.
+Start score: ${startScore}.
+Keep responses to 2-3 short sentences. Sound natural and professional on a phone call.
 
 OPENING: "${opening}"`;
+// ✅ SPRINT 1: JSON scoring instructions removed — scoring is decoupled to async Haiku (P2)
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // ✅ SPRINT 1: IN-MEMORY AUDIO SERVING (eliminates R2 from call loop)
+  // Stores audio buffer in memory with 60s TTL, returns a URL Twilio can fetch.
+  // Safe for single Railway replica. For scale: migrate to Redis.
+  // ═══════════════════════════════════════════════════════════
+
+  _storeTemporaryAudio(buffer, callSid) {
+    const crypto = require('crypto');
+    const id = crypto.randomUUID();
+
+    this.audioCache.set(id, {
+      buffer,
+      expiresAt: Date.now() + 60_000,
+      callSid
+    });
+
+    // Auto-cleanup after 60 seconds
+    setTimeout(() => this.audioCache.delete(id), 60_000);
+
+    return `${this.webhookBaseUrl}/twilio/audio/${id}`;
+  }
+
+  // Called from call-routes.js to serve audio from memory
+  serveAudio(audioId, res) {
+    const item = this.audioCache.get(audioId);
+
+    if (!item || item.expiresAt < Date.now()) {
+      return res.sendStatus(404);
+    }
+
+    res.set({
+      'Content-Type': 'audio/mpeg',
+      'Cache-Control': 'private, max-age=30',
+      'Content-Length': item.buffer.length
+    });
+    res.end(item.buffer);
   }
 
   // ═══════════════════════════════════════════════════════════

@@ -243,11 +243,12 @@ function setupCallRoutes(wsServer, twilioService, elevenLabsService) {
           }, "Sorry, could you say that again?");
         }
         
+        // ✅ SPRINT 1 FIX: speechTimeout 'auto' → 2 (canonical gather config)
         const gather = twiml.gather({
           input: 'speech',
           action: `${process.env.WEBHOOK_BASE_URL}/twilio/gather`,
           method: 'POST',
-          speechTimeout: 'auto',
+          speechTimeout: 2,
           speechModel: 'phone_call',
           enhanced: true,
           language: 'en-GB'
@@ -273,6 +274,16 @@ function setupCallRoutes(wsServer, twilioService, elevenLabsService) {
     }
   });
 
+  // ✅ SPRINT 1: Serve audio from Node.js memory (eliminates R2 from call loop)
+  router.get('/twilio/audio/:audioId', (req, res) => {
+    try {
+      twilioService.serveAudio(req.params.audioId, res);
+    } catch (error) {
+      console.error('[Audio Serve] Error:', error);
+      res.sendStatus(500);
+    }
+  });
+
   // ⚡ ASYNC PATTERN: Wait endpoint - polls for response readiness
   router.post('/twilio/wait/:callSid', async (req, res) => {
     try {
@@ -285,22 +296,25 @@ function setupCallRoutes(wsServer, twilioService, elevenLabsService) {
       
       if (pendingResponse && pendingResponse.success && pendingResponse.audioUrl) {
         // ✅ Response ready! Play it
+        const t8 = Date.now();
+        const waitGap = pendingResponse.timestamp ? (t8 - pendingResponse.timestamp) : 'unknown';
         console.log(`[Twilio Wait] ✅ Response ready for ${callSid}`);
+        console.log(`[Latency t8] 📊 Wait endpoint found response — gap since t7: ${waitGap}ms`);
         console.log(`[Twilio Wait] 📤 Returning audio URL: ${pendingResponse.audioUrl}`);
         
-        // ✅ FIX: Create gather FIRST, then add play and pause INSIDE it
+        // ✅ SPRINT 1 FIX: speechTimeout 'auto' → 2 (canonical gather config)
         const gather = twiml.gather({
           input: 'speech',
           action: `${process.env.WEBHOOK_BASE_URL}/twilio/gather`,
           method: 'POST',
           timeout: 60,
-          speechTimeout: 'auto',
+          speechTimeout: 2,
           speechModel: 'phone_call',
           enhanced: true,
           language: 'en-GB'
         });
         
-        // ✅ FIX: Play audio INSIDE the gather (so call doesn't end)
+        // Play audio INSIDE the gather (so call doesn't end)
         gather.play(pendingResponse.audioUrl);
         gather.pause({ length: 1 });
         
@@ -327,12 +341,13 @@ function setupCallRoutes(wsServer, twilioService, elevenLabsService) {
           }
         }
         
+        // ✅ SPRINT 1 FIX: speechTimeout 'auto' → 2 (canonical gather config)
         const gather = twiml.gather({
           input: 'speech',
           action: `${process.env.WEBHOOK_BASE_URL}/twilio/gather`,
           method: 'POST',
           timeout: 60,
-          speechTimeout: 'auto',
+          speechTimeout: 2,
           speechModel: 'phone_call',
           enhanced: true,
           language: 'en-GB'
@@ -343,8 +358,9 @@ function setupCallRoutes(wsServer, twilioService, elevenLabsService) {
         
       } else {
         // ⏳ Still generating - keep waiting
+        // ✅ SPRINT 1 FIX: Reduced from 2s to 1s — was adding 0-2s hidden latency per turn
         console.log(`[Twilio Wait] ⏳ Still generating for ${callSid}...`);
-        twiml.pause({ length: 2 }); // Wait 2 seconds
+        twiml.pause({ length: 1 });
         twiml.redirect({
           method: 'POST'
         }, `${process.env.WEBHOOK_BASE_URL}/twilio/wait/${callSid}`);
