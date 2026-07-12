@@ -173,7 +173,7 @@ class TwilioService {
   // ChatGPT Requirement: Pre-call Deluge fetch is MANDATORY
   // Only defaults to B2B/corporate when Zoho fetch FAILS
   // ═══════════════════════════════════════════════════════════
-  async makeCall({ to, prospectName, region, scenario, callType, traderProfile, leadId }) {
+  async makeCall({ to, prospectName, region, scenario, callType, traderProfile, leadId, retryCount }) {
     try {
       const actualCallType = callType || scenario || 'broker';
       const actualRegion = region || (traderProfile ? traderProfile.region : 'UK');
@@ -228,7 +228,8 @@ class TwilioService {
           region: zohoLead.country ? this._mapCountryToRegion(zohoLead.country) : actualRegion,
           currentChallenges: zohoLead.currentChallenges || '',
           budgetReadiness: zohoLead.budgetReadiness || '',
-          daysSinceLastTouch: zohoLead.daysSinceLastTouch || 0
+          daysSinceLastTouch: zohoLead.daysSinceLastTouch || 0,
+          retryCount: retryCount || 0
         };
         
         console.log(`[Twilio Service] ✅ ZOHO ENRICHMENT SUCCESS`);
@@ -256,7 +257,8 @@ class TwilioService {
           region: actualRegion,
           currentChallenges: '',
           budgetReadiness: '',
-          daysSinceLastTouch: 0
+          daysSinceLastTouch: 0,
+          retryCount: retryCount || 0
         };
       }
       
@@ -267,6 +269,7 @@ class TwilioService {
       
       // Build call data object
       const callData = {
+        to: to,  // ✅ Store phone number for retry access
         prospectName: callContext.fullName,
         region: callContext.region,
         scenario: actualCallType,
@@ -346,7 +349,7 @@ class TwilioService {
         to: to,
         from: this.phoneNumber,
         statusCallback: `${this.webhookBaseUrl}/twilio/status`,
-        statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
+        statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed', 'no-answer', 'busy', 'failed', 'canceled'],
         statusCallbackMethod: 'POST',
         record: true,
         recordingStatusCallback: `${this.webhookBaseUrl}/twilio/recording`,
@@ -1426,6 +1429,52 @@ OPENING: "${opening}"`;
   handleStatus(callSid, status) {
     console.log(`[Twilio Service] Call ${callSid} status: ${status}`);
     
+    // ═══════════════════════════════════════════════════════════
+    // UNANSWERED CALL RETRY — no-answer, busy, failed, canceled
+    // Twilio fires these when the call never connects to a human
+    // ═══════════════════════════════════════════════════════════
+    if (['no-answer', 'busy', 'failed', 'canceled'].includes(status)) {
+      const callData = this.activeCalls.get(callSid);
+      if (callData) {
+        const retryCount = callData.retryCount || 0;
+        const maxRetries = 2;
+
+        console.log(`[Call Unanswered] 📵 ${status} for ${callData.prospectName} (retry ${retryCount}/${maxRetries})`);
+
+        if (retryCount < maxRetries) {
+          // Retry delays: no-answer = 10 mins, busy = 15 mins, failed = 20 mins
+          const delays = { 'no-answer': 10, 'busy': 15, 'failed': 20, 'canceled': 15 };
+          const delayMins = delays[status] || 15;
+          const delayMs = delayMins * 60 * 1000;
+
+          console.log(`[Call Unanswered] 🔄 Scheduling retry #${retryCount + 1} in ${delayMins} mins (reason: ${status})`);
+          this._scheduleRetryCall(callData, delayMs, retryCount + 1);
+        } else {
+          console.log(`[Call Unanswered] ❌ Max retries (${maxRetries}) reached for ${callData.prospectName}. Marking as unreachable.`);
+
+          // Update Zoho with unreachable status
+          if (callData.leadId && this.zoho.isEnabled()) {
+            this.zoho.triggerSmartCore({
+              lead_id: callData.leadId,
+              call_id: callSid,
+              call_status: status,
+              call_outcome: 'unreachable',
+              last_outcome: 'unreachable',
+              last_agent: 'Claude_AI_Call_Agent',
+              last_touch_channel: 'AI Call',
+              call_timestamp: callData.startTime,
+              call_duration_seconds: 0,
+              intent_score_final: callData.intentScore || 0
+            }).catch(err => console.error(`[Call Unanswered] Zoho update failed:`, err.message));
+          }
+        }
+
+        // Clean up active call data
+        this.activeCalls.delete(callSid);
+      }
+      return;
+    }
+
     if (status === 'completed') {
       const callData = this.activeCalls.get(callSid);
       if (callData) {
@@ -1507,11 +1556,11 @@ OPENING: "${opening}"`;
 
   // ═══════════════════════════════════════════════════════════
   // CALL COMPLETION — Schedule retry call after delay
-  // Handles: dropped calls, silence timeouts, busy prospects
+  // Handles: dropped calls, silence timeouts, busy prospects, unanswered calls
   // ═══════════════════════════════════════════════════════════
   _scheduleRetryCall(originalCallData, delayMs, retryNumber) {
     const { leadId, prospectName, region, leadType } = originalCallData;
-    const phone = originalCallData.zohoLead?.phone || null;
+    const phone = originalCallData.zohoLead?.phone || originalCallData.to || null;
     
     if (!phone || !leadId) {
       console.error('[Call Completion] ❌ Cannot schedule retry — missing phone or leadId');
@@ -1522,14 +1571,15 @@ OPENING: "${opening}"`;
       try {
         console.log(`[Call Completion] 📞 Firing retry #${retryNumber} for ${prospectName} (${phone})`);
         
-        // Re-initiate the call with retry count passed through
-        await this.initiateCall({
-          leadId,
-          phone,
-          name: prospectName,
-          region,
-          leadType,
-          intentScore: originalCallData.intentScore || 0,
+        // ✅ FIX: Method is makeCall, not initiateCall. Parameter mapping corrected.
+        await this.makeCall({
+          to: phone,
+          prospectName: prospectName,
+          region: region || 'Nigeria',
+          scenario: leadType === 'B2B' ? 'broker' : 'trader',
+          callType: leadType === 'B2B' ? 'broker' : 'trader',
+          traderProfile: originalCallData.traderProfile || null,
+          leadId: leadId,
           retryCount: retryNumber
         });
         
