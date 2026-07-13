@@ -1160,32 +1160,34 @@ FORMAT (output exactly this, replacing values with actual numbers):
   // ⚡ SMART TOKEN ALLOCATION
   _getOptimalTokens(callData, userSpeech) {
     const turnCount = callData.conversationHistory.length / 2;
-    const userWordCount = userSpeech.split(' ').length;
+    const userWordCount = userSpeech.trim().split(/\s+/).length;
     const intentScore = callData.intentScore || 0;
+    const lower = userSpeech.toLowerCase();
 
-    // ✅ SPRINT 1: Tightened B2C token budgets (JSON scoring removed — no longer need +30 tokens)
-    // Data shows: every 10 extra words ≈ +400ms Claude latency
-    // Sprint 2 will introduce move-based budgets via next_best_action
+    // Objection detection — these need slightly more room (28 words max = ~60 tokens)
+    const objectionKeywords = ['but', 'however', 'concern', 'worried', 'expensive', 'not sure',
+      'think about', 'scam', 'burned', 'lose', 'risk', 'scared', 'how do i know',
+      'prove', 'guarantee', 'trust', 'already tried', 'competitor', 'too busy'];
+    const hasObjection = objectionKeywords.some(kw => lower.includes(kw));
+
     if (callData.leadType === 'B2C') {
-      if (userWordCount <= 3) return 35;     // Short reply: quick acknowledgement
-      if (intentScore < 30) return 65;       // Cold: tight discovery question
-      if (intentScore < 60) return 65;       // Warm: probe + one question
-      if (intentScore < 75) return 75;       // Hot: objection handling needs room
-      return 60;                              // SQL: clean close + logistics
+      // ✅ HARD CEILING: 18 spoken words = ~40 tokens (every 10 words ≈ +400ms)
+      // Exception 1: Objection handling — 28 words max = ~60 tokens
+      // Exception 2: High-intent close (75+) — 28 words to lock in logistics cleanly
+      if (hasObjection) return 60;             // Objection: 28 words — empathy + reframe + question
+      if (intentScore >= 75) return 60;        // SQL close: 28 words — binary choice + confirm
+      if (intentScore >= 60) return 55;        // Hot: slightly more room for pain deepening
+      if (userWordCount <= 3) return 35;       // Very short reply: 15 words max — quick ack
+      return 45;                               // Default: 18 words — discovery + one question
     }
 
-    // B2B: Allow longer responses (existing logic)
+    // B2B: Allow more room — these are strategic broker conversations
     if (turnCount <= 1) return 180;
-    if (userWordCount > 30) return 350;
-    if (intentScore >= 60) return 300;
-
-    const objectionKeywords = ['but', 'however', 'concern', 'worried', 'expensive', 'not sure', 'think about'];
-    const hasObjection = objectionKeywords.some(kw => userSpeech.toLowerCase().includes(kw));
-    if (hasObjection) return 320;
-
-    if (userWordCount < 5) return 150;
-
-    return 220;
+    if (hasObjection) return 280;
+    if (userWordCount > 30) return 300;
+    if (intentScore >= 60) return 260;
+    if (userWordCount < 5) return 140;
+    return 200;
   }
 
   // ═══════════════════════════════════════════════════════════
