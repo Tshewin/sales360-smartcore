@@ -77,15 +77,34 @@ class TwilioService {
       'busy_callback': "No worries at all! I'll give you a call back in about 30 minutes. Have a great day!",
       'natural_signoff': "Sorry about that, let me call you right back. Talk in a moment!",
       'error_recovery': "Apologies, give me one second. Actually, let me call you right back so we get a clean line.",
-      // FILLER PHRASES — played instantly while Claude thinks
-      'filler_1': "Mmhmm...",
-      'filler_2': "Right...",
-      'filler_3': "I hear you...",
-      'filler_4': "Okay...",
-      'filler_5': "Yeah..."
+      // ═══════════════════════════════════════════════════════════
+      // TIER 1 — AFFIRMATION FILLERS (played AFTER prospect finishes, while Claude thinks)
+      // Sounds like a real salesperson processing what they just heard
+      // ═══════════════════════════════════════════════════════════
+      'affirm_1': "Perfect.",
+      'affirm_2': "Absolutely.",
+      'affirm_3': "Makes sense.",
+      'affirm_4': "Got it.",
+      'affirm_5': "Love that.",
+      'affirm_6': "That's great.",
+      'affirm_7': "Interesting.",
+      'affirm_8': "Fair enough.",
+
+      // ═══════════════════════════════════════════════════════════
+      // TIER 2 — BACKCHANNEL CLIPS (very short, played sparingly to show active listening)
+      // Used max once every 2 turns to stay natural, not robotic
+      // ═══════════════════════════════════════════════════════════
+      'back_1': "Mmhmm.",
+      'back_2': "Right.",
+      'back_3': "Yeah.",
+      'back_4': "Okay.",
+      'back_5': "Sure."
     };
-    this._fillerKeys = ['filler_1', 'filler_2', 'filler_3', 'filler_4', 'filler_5'];
-    this._lastFillerIndex = -1;
+    this._affirmKeys = ['affirm_1','affirm_2','affirm_3','affirm_4','affirm_5','affirm_6','affirm_7','affirm_8'];
+    this._backchannelKeys = ['back_1','back_2','back_3','back_4','back_5'];
+    this._lastAffirmIndex = -1;
+    this._lastBackchannelIndex = -1;
+    this._turnsSinceBackchannel = 0; // Throttle — max 1 backchannel per 2 turns
     this._preloadFallbackAudio();
     
     console.log('[Twilio Service] ✅ Initialized with number:', this.phoneNumber);
@@ -131,41 +150,96 @@ class TwilioService {
     }
   }
 
-  // ✅ SPRINT 1: Context-sensitive filler selection (replaces random selection)
-  // Prevents semantically wrong fillers like "Yeah..." after "I've lost money"
-  _getContextFiller(userSpeech) {
-    if (!this._fillerKeys || this._fillerKeys.length === 0) return null;
-    if (!userSpeech) return this.fallbackAudioUrls.get('filler_3') || null; // "I hear you..."
+  // ═══════════════════════════════════════════════════════════════════
+  // TWO-TIER FILLER SYSTEM (Sprint 1 upgrade)
+  //
+  // TIER 1 — AFFIRMATION: Played AFTER prospect finishes speaking, while
+  // Claude is generating. Sounds like a real salesperson acknowledging.
+  // Context-matched to what the prospect just said.
+  //
+  // TIER 2 — BACKCHANNEL: Very short clips showing real-time attention.
+  // Throttled to max 1 per 2 turns so it stays natural, not robotic.
+  // ═══════════════════════════════════════════════════════════════════
 
-    const lower = userSpeech.toLowerCase();
+  // TIER 1: Context-matched affirmation filler
+  _getAffirmFiller(userSpeech) {
+    if (!this._affirmKeys || this._affirmKeys.length === 0) return null;
 
-    // Negative/pain context → empathetic filler
-    if (/\b(lost|scam|burned|worried|afraid|problem|struggling|frustrated|scared)\b/.test(lower)) {
-      return this.fallbackAudioUrls.get('filler_3') || null; // "I hear you..."
+    const lower = (userSpeech || '').toLowerCase();
+    const wordCount = (userSpeech || '').trim().split(/\s+/).length;
+
+    // Very short replies (1-2 words: "yes", "ok", "sure") → skip affirmation, feels odd
+    if (wordCount <= 2) return null;
+
+    let key;
+
+    // Pain/problem context → empathetic acknowledgement
+    if (/\b(lost|losing|struggling|frustrated|worried|scared|burned|problem|difficult|hard|tough|stressed)\b/.test(lower)) {
+      key = 'affirm_8'; // "Fair enough."
+    }
+    // Strong agreement → match their energy
+    else if (/\b(yes|exactly|absolutely|definitely|100|totally|agree|that's right|correct)\b/.test(lower)) {
+      key = 'affirm_2'; // "Absolutely."
+    }
+    // Sharing goals/dreams → positive energy
+    else if (/\b(want|goal|dream|hope|wish|plan|trying|looking|aiming)\b/.test(lower)) {
+      key = 'affirm_5'; // "Love that."
+    }
+    // Numbers/specifics mentioned → show you're tracking
+    else if (/\b(\d+|thousand|million|hundred|percent|%|dollars|pounds|naira)\b/.test(lower)) {
+      key = 'affirm_3'; // "Makes sense."
+    }
+    // Long detailed response (15+ words) → they're engaged, affirm warmly
+    else if (wordCount >= 15) {
+      key = 'affirm_6'; // "That's great."
+    }
+    // Medium response — rotate through generic affirmations
+    else {
+      // Rotate: Perfect → Got it → Interesting → Makes sense (never repeats consecutively)
+      const neutralKeys = ['affirm_1','affirm_4','affirm_7','affirm_3'];
+      let idx;
+      do {
+        idx = Math.floor(Math.random() * neutralKeys.length);
+      } while (neutralKeys[idx] === this._lastAffirmKey && neutralKeys.length > 1);
+      this._lastAffirmKey = neutralKeys[idx];
+      return this.fallbackAudioUrls.get(neutralKeys[idx]) || null;
     }
 
-    // Agreement/affirmation → confirming filler
-    if (/\b(yes|exactly|correct|that is right|absolutely|definitely)\b/.test(lower)) {
-      return this.fallbackAudioUrls.get('filler_2') || null; // "Right..."
-    }
-
-    // Long response (20+ words) → active listening
-    if (userSpeech.trim().split(/\s+/).length > 20) {
-      return this.fallbackAudioUrls.get('filler_1') || null; // "Mmhmm..."
-    }
-
-    // Short responses (1-3 words) → no filler (sounds synthetic on quick replies)
-    if (userSpeech.trim().split(/\s+/).length <= 3) {
-      return null;
-    }
-
-    // Default — use "Okay..." for neutral context
-    return this.fallbackAudioUrls.get('filler_4') || null; // "Okay..."
+    this._lastAffirmKey = key;
+    return this.fallbackAudioUrls.get(key) || null;
   }
 
-  // Legacy method name for backward compatibility
+  // TIER 2: Backchannel clip — played before main affirmation on longer speeches
+  // Only fires if: prospect spoke 10+ words AND we haven't used one in 2 turns
+  _getBackchannelClip(userSpeech) {
+    const wordCount = (userSpeech || '').trim().split(/\s+/).length;
+
+    // Only on longer prospect turns (they're actually talking)
+    if (wordCount < 10) return null;
+
+    // Throttle — max once every 2 turns to stay natural
+    this._turnsSinceBackchannel = (this._turnsSinceBackchannel || 0) + 1;
+    if (this._turnsSinceBackchannel < 2) return null;
+
+    this._turnsSinceBackchannel = 0;
+
+    // Pick a backchannel, never repeating the same one twice
+    let idx;
+    do {
+      idx = Math.floor(Math.random() * this._backchannelKeys.length);
+    } while (idx === this._lastBackchannelIndex && this._backchannelKeys.length > 1);
+    this._lastBackchannelIndex = idx;
+
+    return this.fallbackAudioUrls.get(this._backchannelKeys[idx]) || null;
+  }
+
+  // Legacy shim — still called from processUserResponse
+  _getContextFiller(userSpeech) {
+    return this._getAffirmFiller(userSpeech);
+  }
+
   _getRandomFiller() {
-    return this._getContextFiller(null);
+    return this._getAffirmFiller(null);
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -723,16 +797,26 @@ class TwilioService {
     this.generateResponseAsync(callSid, speechResult, wsServer);
     
     // ═══════════════════════════════════════════════════════════
-    // FILLER PHRASE — Context-sensitive (Sprint 1)
-    // Matches filler to prospect's emotional context
-    // Skips filler on very short replies to avoid sounding synthetic
+    // TWO-TIER FILLER SYSTEM
+    //
+    // TIER 2 FIRST: Backchannel clip — very short, shows real-time attention
+    // Only fires on 10+ word responses, max once every 2 turns
+    //
+    // TIER 1 SECOND: Affirmation — context-matched acknowledgement
+    // Played while Claude thinks. Sounds like a real salesperson.
     // ═══════════════════════════════════════════════════════════
-    const fillerUrl = this._getContextFiller(speechResult);
-    if (fillerUrl) {
-      twiml.play(fillerUrl);
-      console.log(`[Twilio] 🎯 Context filler played — Claude gets head start`);
+    const backchannelUrl = this._getBackchannelClip(speechResult);
+    if (backchannelUrl) {
+      twiml.play(backchannelUrl);
+      console.log(`[Twilio] 💬 Backchannel played (active listening signal)`);
+    }
+
+    const affirmUrl = this._getAffirmFiller(speechResult);
+    if (affirmUrl) {
+      twiml.play(affirmUrl);
+      console.log(`[Twilio] 🎯 Affirmation filler played — Claude gets head start`);
     } else {
-      console.log(`[Twilio] ⏭️  No filler (short reply or no match)`);
+      console.log(`[Twilio] ⏭️  No affirmation (very short reply)`);
     }
     
     // Return with redirect to wait endpoint
