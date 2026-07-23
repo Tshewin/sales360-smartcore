@@ -77,34 +77,15 @@ class TwilioService {
       'busy_callback': "No worries at all! I'll give you a call back in about 30 minutes. Have a great day!",
       'natural_signoff': "Sorry about that, let me call you right back. Talk in a moment!",
       'error_recovery': "Apologies, give me one second. Actually, let me call you right back so we get a clean line.",
-      // ═══════════════════════════════════════════════════════════
-      // TIER 1 — AFFIRMATION FILLERS (played AFTER prospect finishes, while Claude thinks)
-      // Sounds like a real salesperson processing what they just heard
-      // ═══════════════════════════════════════════════════════════
-      'affirm_1': "Perfect.",
-      'affirm_2': "Absolutely.",
-      'affirm_3': "Makes sense.",
-      'affirm_4': "Got it.",
-      'affirm_5': "Love that.",
-      'affirm_6': "That's great.",
-      'affirm_7': "Interesting.",
-      'affirm_8': "Fair enough.",
-
-      // ═══════════════════════════════════════════════════════════
-      // TIER 2 — BACKCHANNEL CLIPS (very short, played sparingly to show active listening)
-      // Used max once every 2 turns to stay natural, not robotic
-      // ═══════════════════════════════════════════════════════════
-      'back_1': "Mmhmm.",
-      'back_2': "Right.",
-      'back_3': "Yeah.",
-      'back_4': "Okay.",
-      'back_5': "Sure."
+      // FILLER PHRASES — played instantly while Claude thinks
+      'filler_1': "Mmhmm...",
+      'filler_2': "Right...",
+      'filler_3': "I hear you...",
+      'filler_4': "Okay...",
+      'filler_5': "Yeah..."
     };
-    this._affirmKeys = ['affirm_1','affirm_2','affirm_3','affirm_4','affirm_5','affirm_6','affirm_7','affirm_8'];
-    this._backchannelKeys = ['back_1','back_2','back_3','back_4','back_5'];
-    this._lastAffirmIndex = -1;
-    this._lastBackchannelIndex = -1;
-    this._turnsSinceBackchannel = 0; // Throttle — max 1 backchannel per 2 turns
+    this._fillerKeys = ['filler_1', 'filler_2', 'filler_3', 'filler_4', 'filler_5'];
+    this._lastFillerIndex = -1;
     this._preloadFallbackAudio();
     
     console.log('[Twilio Service] ✅ Initialized with number:', this.phoneNumber);
@@ -150,75 +131,42 @@ class TwilioService {
     }
   }
 
-  // ═══════════════════════════════════════════════════════════════════
-  // ═══════════════════════════════════════════════════════════
-  // SMART FILLER — ONE clip only, played while Claude thinks
-  //
-  // RULES:
-  // 1. Never play two clips — one reaction sound maximum
-  // 2. Only play on 8+ word responses (short replies don't need it)
-  // 3. Throttled — max once every 2 turns (prevents robotic pattern)
-  // 4. On very short calls (turn 1-2) don't play — too early
-  // 5. Context-matched to prospect speech
-  //
-  // NOTE: Claude's prompt already opens with its own reaction
-  // ("That's real bro...", "I hear you...", "Now we're talking!")
-  // so this filler just bridges the silence GAP before that arrives.
-  // ═══════════════════════════════════════════════════════════
-  _getSmartFiller(userSpeech) {
-    const wordCount = (userSpeech || '').trim().split(/\s+/).length;
-    const lower = (userSpeech || '').toLowerCase();
+  // ✅ SPRINT 1: Context-sensitive filler selection (replaces random selection)
+  // Prevents semantically wrong fillers like "Yeah..." after "I've lost money"
+  _getContextFiller(userSpeech) {
+    if (!this._fillerKeys || this._fillerKeys.length === 0) return null;
+    if (!userSpeech) return this.fallbackAudioUrls.get('filler_3') || null; // "I hear you..."
 
-    // Rule 1: Skip on very short replies — Claude responds fast anyway
-    if (wordCount <= 4) return null;
+    const lower = userSpeech.toLowerCase();
 
-    // Rule 2: Throttle — max once every 2 turns
-    this._turnsSinceFiller = (this._turnsSinceFiller || 0) + 1;
-    if (this._turnsSinceFiller < 2) return null;
-    this._turnsSinceFiller = 0;
-
-    // Rule 3: Pick ONE context-appropriate clip
-    let key;
-
-    // Pain/frustration → empathetic
-    if (/\b(lost|losing|struggling|frustrated|worried|scared|burned|problem|difficult|hard|tough|failed)\b/.test(lower)) {
-      key = 'affirm_8'; // "Fair enough."
-    }
-    // Sharing goals/ambitions → warm energy
-    else if (/\b(want|freedom|goal|dream|hope|wish|plan|financial|income|money|earn)\b/.test(lower)) {
-      key = 'affirm_5'; // "Love that."
-    }
-    // Long response (20+ words) — they're talking, use neutral bridge
-    else if (wordCount >= 20) {
-      // Rotate between Got it / Makes sense / Interesting
-      const longKeys = ['affirm_4', 'affirm_3', 'affirm_7'];
-      let idx;
-      do {
-        idx = Math.floor(Math.random() * longKeys.length);
-      } while (longKeys[idx] === this._lastFillerKey && longKeys.length > 1);
-      this._lastFillerKey = longKeys[idx];
-      return this.fallbackAudioUrls.get(longKeys[idx]) || null;
-    }
-    // Medium response (5-19 words) — rotate affirmations
-    else {
-      const midKeys = ['affirm_1', 'affirm_4', 'affirm_3'];
-      let idx;
-      do {
-        idx = Math.floor(Math.random() * midKeys.length);
-      } while (midKeys[idx] === this._lastFillerKey && midKeys.length > 1);
-      this._lastFillerKey = midKeys[idx];
-      return this.fallbackAudioUrls.get(midKeys[idx]) || null;
+    // Negative/pain context → empathetic filler
+    if (/\b(lost|scam|burned|worried|afraid|problem|struggling|frustrated|scared)\b/.test(lower)) {
+      return this.fallbackAudioUrls.get('filler_3') || null; // "I hear you..."
     }
 
-    this._lastFillerKey = key;
-    return this.fallbackAudioUrls.get(key) || null;
+    // Agreement/affirmation → confirming filler
+    if (/\b(yes|exactly|correct|that is right|absolutely|definitely)\b/.test(lower)) {
+      return this.fallbackAudioUrls.get('filler_2') || null; // "Right..."
+    }
+
+    // Long response (20+ words) → active listening
+    if (userSpeech.trim().split(/\s+/).length > 20) {
+      return this.fallbackAudioUrls.get('filler_1') || null; // "Mmhmm..."
+    }
+
+    // Short responses (1-3 words) → no filler (sounds synthetic on quick replies)
+    if (userSpeech.trim().split(/\s+/).length <= 3) {
+      return null;
+    }
+
+    // Default — use "Okay..." for neutral context
+    return this.fallbackAudioUrls.get('filler_4') || null; // "Okay..."
   }
 
-  // Shims for any legacy references
-  _getContextFiller(userSpeech) { return this._getSmartFiller(userSpeech); }
-  _getRandomFiller() { return null; } // Disabled — use _getSmartFiller instead
-  _getAffirmFiller(userSpeech) { return this._getSmartFiller(userSpeech); }
-  _getBackchannelClip() { return null; } // Disabled — was causing double-clip issue
+  // Legacy method name for backward compatibility
+  _getRandomFiller() {
+    return this._getContextFiller(null);
+  }
 
   // ═══════════════════════════════════════════════════════════
   // ✅ UPDATED: MAKE OUTBOUND CALL WITH MANDATORY ZOHO ENRICHMENT
@@ -775,22 +723,16 @@ class TwilioService {
     this.generateResponseAsync(callSid, speechResult, wsServer);
     
     // ═══════════════════════════════════════════════════════════
-    // SINGLE SMART FILLER — one clip only, played while Claude thinks
-    //
-    // WHY ONE CLIP: Playing backchannel + affirmation back to back
-    // sounds broken. Real salespeople make ONE sound, then respond.
-    //
-    // SUPPRESSION LOGIC: Claude's prompt already instructs it to
-    // open with a reaction ("That's real...", "I hear you...", etc.)
-    // So we only play a filler on LONGER prospect speeches where the
-    // wait would otherwise feel like dead silence.
+    // FILLER PHRASE — Context-sensitive (Sprint 1)
+    // Matches filler to prospect's emotional context
+    // Skips filler on very short replies to avoid sounding synthetic
     // ═══════════════════════════════════════════════════════════
-    const fillerUrl = this._getSmartFiller(speechResult);
+    const fillerUrl = this._getContextFiller(speechResult);
     if (fillerUrl) {
       twiml.play(fillerUrl);
-      console.log(`[Twilio] 🎯 Filler played`);
+      console.log(`[Twilio] 🎯 Context filler played — Claude gets head start`);
     } else {
-      console.log(`[Twilio] ⏭️  No filler`);
+      console.log(`[Twilio] ⏭️  No filler (short reply or no match)`);
     }
     
     // Return with redirect to wait endpoint
@@ -1134,34 +1076,32 @@ FORMAT (output exactly this, replacing values with actual numbers):
   // ⚡ SMART TOKEN ALLOCATION
   _getOptimalTokens(callData, userSpeech) {
     const turnCount = callData.conversationHistory.length / 2;
-    const userWordCount = userSpeech.trim().split(/\s+/).length;
+    const userWordCount = userSpeech.split(' ').length;
     const intentScore = callData.intentScore || 0;
-    const lower = userSpeech.toLowerCase();
 
-    // Objection detection — these need slightly more room (28 words max = ~60 tokens)
-    const objectionKeywords = ['but', 'however', 'concern', 'worried', 'expensive', 'not sure',
-      'think about', 'scam', 'burned', 'lose', 'risk', 'scared', 'how do i know',
-      'prove', 'guarantee', 'trust', 'already tried', 'competitor', 'too busy'];
-    const hasObjection = objectionKeywords.some(kw => lower.includes(kw));
-
+    // ✅ SPRINT 1: Tightened B2C token budgets (JSON scoring removed — no longer need +30 tokens)
+    // Data shows: every 10 extra words ≈ +400ms Claude latency
+    // Sprint 2 will introduce move-based budgets via next_best_action
     if (callData.leadType === 'B2C') {
-      // ✅ HARD CEILING: 18 spoken words = ~40 tokens (every 10 words ≈ +400ms)
-      // Exception 1: Objection handling — 28 words max = ~60 tokens
-      // Exception 2: High-intent close (75+) — 28 words to lock in logistics cleanly
-      if (hasObjection) return 60;             // Objection: 28 words — empathy + reframe + question
-      if (intentScore >= 75) return 60;        // SQL close: 28 words — binary choice + confirm
-      if (intentScore >= 60) return 55;        // Hot: slightly more room for pain deepening
-      if (userWordCount <= 3) return 35;       // Very short reply: 15 words max — quick ack
-      return 45;                               // Default: 18 words — discovery + one question
+      if (userWordCount <= 3) return 35;     // Short reply: quick acknowledgement
+      if (intentScore < 30) return 65;       // Cold: tight discovery question
+      if (intentScore < 60) return 65;       // Warm: probe + one question
+      if (intentScore < 75) return 75;       // Hot: objection handling needs room
+      return 60;                              // SQL: clean close + logistics
     }
 
-    // B2B: Allow more room — these are strategic broker conversations
+    // B2B: Allow longer responses (existing logic)
     if (turnCount <= 1) return 180;
-    if (hasObjection) return 280;
-    if (userWordCount > 30) return 300;
-    if (intentScore >= 60) return 260;
-    if (userWordCount < 5) return 140;
-    return 200;
+    if (userWordCount > 30) return 350;
+    if (intentScore >= 60) return 300;
+
+    const objectionKeywords = ['but', 'however', 'concern', 'worried', 'expensive', 'not sure', 'think about'];
+    const hasObjection = objectionKeywords.some(kw => userSpeech.toLowerCase().includes(kw));
+    if (hasObjection) return 320;
+
+    if (userWordCount < 5) return 150;
+
+    return 220;
   }
 
   // ═══════════════════════════════════════════════════════════
