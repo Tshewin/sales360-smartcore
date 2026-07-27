@@ -77,15 +77,11 @@ class TwilioService {
       'busy_callback': "No worries at all! I'll give you a call back in about 30 minutes. Have a great day!",
       'natural_signoff': "Sorry about that, let me call you right back. Talk in a moment!",
       'error_recovery': "Apologies, give me one second. Actually, let me call you right back so we get a clean line.",
-      // FILLER PHRASES — played instantly while Claude thinks
-      'filler_1': "Mmhmm...",
-      'filler_2': "Right...",
-      'filler_3': "I hear you...",
-      'filler_4': "Okay...",
-      'filler_5': "Yeah..."
+      // THINKING SOUND — single "Ummm..." played while Claude generates
+      // Signals the agent is processing, not silent. Neutral — never clashes with Claude's response.
+      'ummm': "Ummm..."
     };
-    this._fillerKeys = ['filler_1', 'filler_2', 'filler_3', 'filler_4', 'filler_5'];
-    this._lastFillerIndex = -1;
+    this._turnsSinceUmmm = 0; // Throttle — max once every 3 turns
     this._preloadFallbackAudio();
     
     console.log('[Twilio Service] ✅ Initialized with number:', this.phoneNumber);
@@ -131,41 +127,28 @@ class TwilioService {
     }
   }
 
-  // ✅ SPRINT 1: Context-sensitive filler selection (replaces random selection)
-  // Prevents semantically wrong fillers like "Yeah..." after "I've lost money"
+  // Single "Ummm..." thinking sound — plays while Claude generates a response
+  // Rules:
+  // 1. Only on responses 8+ words (prospect is actually saying something)
+  // 2. Max once every 3 turns (never becomes a signature pattern)
+  // 3. Never on very short replies — silence is more natural there
   _getContextFiller(userSpeech) {
-    if (!this._fillerKeys || this._fillerKeys.length === 0) return null;
-    if (!userSpeech) return this.fallbackAudioUrls.get('filler_3') || null; // "I hear you..."
+    const wordCount = (userSpeech || '').trim().split(/\s+/).length;
 
-    const lower = userSpeech.toLowerCase();
+    // Skip on very short replies — silence sounds more natural
+    if (wordCount < 8) return null;
 
-    // Negative/pain context → empathetic filler
-    if (/\b(lost|scam|burned|worried|afraid|problem|struggling|frustrated|scared)\b/.test(lower)) {
-      return this.fallbackAudioUrls.get('filler_3') || null; // "I hear you..."
-    }
+    // Throttle — max once every 3 turns
+    this._turnsSinceUmmm = (this._turnsSinceUmmm || 0) + 1;
+    if (this._turnsSinceUmmm < 3) return null;
 
-    // Agreement/affirmation → confirming filler
-    if (/\b(yes|exactly|correct|that is right|absolutely|definitely)\b/.test(lower)) {
-      return this.fallbackAudioUrls.get('filler_2') || null; // "Right..."
-    }
-
-    // Long response (20+ words) → active listening
-    if (userSpeech.trim().split(/\s+/).length > 20) {
-      return this.fallbackAudioUrls.get('filler_1') || null; // "Mmhmm..."
-    }
-
-    // Short responses (1-3 words) → no filler (sounds synthetic on quick replies)
-    if (userSpeech.trim().split(/\s+/).length <= 3) {
-      return null;
-    }
-
-    // Default — use "Okay..." for neutral context
-    return this.fallbackAudioUrls.get('filler_4') || null; // "Okay..."
+    // Reset counter and play the single thinking sound
+    this._turnsSinceUmmm = 0;
+    return this.fallbackAudioUrls.get('ummm') || null;
   }
 
-  // Legacy method name for backward compatibility
   _getRandomFiller() {
-    return this._getContextFiller(null);
+    return null; // Disabled — using _getContextFiller with throttle only
   }
 
   // ═══════════════════════════════════════════════════════════
