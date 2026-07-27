@@ -848,16 +848,25 @@ class TwilioService {
       .map(t => `- ${t}`)
       .join('\n');
 
+    // Highlight critical facts (email, phone, name, commitment) prominently
+    const critical = [];
+    if (facts.email) critical.push(`EMAIL COLLECTED: ${facts.email} — DO NOT ASK FOR EMAIL AGAIN`);
+    if (facts.phone) critical.push(`PHONE COLLECTED: ${facts.phone} — DO NOT ASK FOR PHONE AGAIN`);
+    if (facts.prospect_name) critical.push(`NAME CONFIRMED: ${facts.prospect_name}`);
+    if (facts.commitment) critical.push(`COMMITMENT GIVEN: ${facts.commitment}`);
+    const criticalLines = critical.map(c => `LOCKED: ${c}`).join('\n');
+
     return `═══════════════════════════════════════════
 CURRENT CALL STATE (DO NOT DISCOVER THESE AGAIN)
 ═══════════════════════════════════════════
-KNOWN FACTS:
+${criticalLines ? `CRITICAL — ALREADY CONFIRMED (NEVER ASK AGAIN):\n${criticalLines}\n\n` : ''}KNOWN FACTS:
 ${factLines || '- Nothing confirmed yet (first turn)'}
 
 TOPICS ALREADY ASKED ABOUT:
 ${askedLines || '- None yet'}
 
-DO NOT re-ask about any known fact. Build on what you know. Advance the conversation forward.`;
+RULES: Never re-ask about any known fact. Never ask for email or phone if already collected above.
+Build on what you know. Every turn must end with a clear question OR a clear next step — never leave the conversation hanging.`;
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -889,34 +898,91 @@ DO NOT re-ask about any known fact. Build on what you know. Advance the conversa
 
     const lower = userSpeech.toLowerCase();
 
-    // Track known facts based on keywords in user speech
+    // ─────────────────────────────────────────────────────────
+    // CRITICAL: Detect email addresses explicitly
+    // This prevents Claude ever asking for email again once given
+    // ─────────────────────────────────────────────────────────
+    const emailMatch = userSpeech.match(/[a-zA-Z0-9._+-]+\s*@\s*[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+    if (emailMatch) {
+      const email = emailMatch[0].replace(/\s+/g, '').toLowerCase();
+      state.known_facts['email'] = email;
+      if (!state.asked_topics.includes('email')) state.asked_topics.push('email');
+      console.log(`[State] ✅ Email captured: ${email}`);
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // Detect phone numbers
+    // ─────────────────────────────────────────────────────────
+    const phoneMatch = userSpeech.match(/(\+?\d[\d\s\-]{8,}\d)/);
+    if (phoneMatch && !emailMatch) { // avoid matching email digits
+      state.known_facts['phone'] = phoneMatch[0].replace(/\s+/g, '');
+      if (!state.asked_topics.includes('phone')) state.asked_topics.push('phone');
+      console.log(`[State] ✅ Phone captured: ${state.known_facts['phone']}`);
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // Detect when prospect gives their name
+    // ─────────────────────────────────────────────────────────
+    const nameMatch = userSpeech.match(/(?:(?:my name is|i'm|i am|call me|it's)\s+)([A-Z][a-z]+)/i);
+    if (nameMatch) {
+      state.known_facts['prospect_name'] = nameMatch[1];
+      console.log(`[State] ✅ Name captured: ${nameMatch[1]}`);
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // Detect key commitments — prospect agreeing to next steps
+    // ─────────────────────────────────────────────────────────
+    const commitmentPatterns = [
+      { keys: ['send me the link', 'send it over', 'send me the email', 'send the details', 'send me info'], fact: 'commitment', value: 'wants info/link sent by email' },
+      { keys: ['i\'ll check it out', 'i\'ll look at it', 'i\'ll review', 'i\'ll take a look'], fact: 'commitment', value: 'agreed to review info' },
+      { keys: ['call me back', 'call me later', 'call tomorrow', 'call next week'], fact: 'commitment', value: 'agreed to callback' },
+      { keys: ['i\'m interested', 'sounds good', 'that sounds great', 'i want to'], fact: 'commitment', value: 'expressed interest' },
+      { keys: ['i\'ll sign up', 'let\'s do it', 'go ahead', 'set it up'], fact: 'commitment', value: 'ready to proceed' },
+    ];
+
+    for (const pattern of commitmentPatterns) {
+      if (pattern.keys.some(k => lower.includes(k))) {
+        state.known_facts[pattern.fact] = pattern.value;
+        console.log(`[State] ✅ Commitment captured: ${pattern.value}`);
+      }
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // Standard fact patterns
+    // ─────────────────────────────────────────────────────────
     const factPatterns = [
-      { keys: ['financial freedom', 'make money', 'extra income', 'passive income', 'side income'], fact: 'goal', value: 'financial freedom / extra income' },
-      { keys: ['beginner', 'just starting', 'new to', 'never traded', 'don\'t know how'], fact: 'experience', value: 'beginner' },
-      { keys: ['been trading', 'already trade', 'some experience', 'traded before'], fact: 'experience', value: 'has some experience' },
-      { keys: ['busy', 'work', 'no time', 'demanding job'], fact: 'constraint', value: 'busy with work / limited time' },
-      { keys: ['scared', 'afraid', 'lose money', 'risky', 'scam'], fact: 'fear', value: 'fears losing money / trust concerns' },
-      { keys: ['burned', 'bad experience', 'lost money before', 'other broker'], fact: 'past_experience', value: 'bad experience with previous broker' },
-      { keys: ['whatsapp', 'email', 'call me'], fact: 'preferred_channel', value: lower.includes('whatsapp') ? 'WhatsApp' : lower.includes('email') ? 'Email' : 'Phone' },
-      { keys: ['200', '500', '1000', '5000', 'thousand', 'hundred'], fact: 'capital_mentioned', value: userSpeech.match(/[\$\u00a3\u20a6]?\d[\d,]*/)?.[0] || 'amount mentioned' },
-      { keys: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'tomorrow', 'next week', 'weekend'], fact: 'timeline', value: userSpeech.match(/monday|tuesday|wednesday|thursday|friday|tomorrow|next week|weekend/i)?.[0] || 'time mentioned' },
+      { keys: ['financial freedom', 'make money', 'extra income', 'passive income', 'side income', 'second income'], fact: 'goal', value: 'financial freedom / extra income' },
+      { keys: ['time freedom', 'quit my job', '9 to 5', '9-to-5', 'leave work', 'retire'], fact: 'goal', value: 'time freedom / escape 9-to-5' },
+      { keys: ['beginner', 'just starting', 'new to', 'never traded', 'don\'t know how', 'want to learn'], fact: 'experience', value: 'beginner' },
+      { keys: ['been trading', 'already trade', 'some experience', 'traded before', 'i trade'], fact: 'experience', value: 'has some experience' },
+      { keys: ['busy', 'no time', 'demanding job', 'work keeps'], fact: 'constraint', value: 'busy with work / limited time' },
+      { keys: ['scared', 'afraid', 'lose money', 'risky', 'scam', 'trust'], fact: 'fear', value: 'fears losing money / trust concerns' },
+      { keys: ['burned', 'bad experience', 'lost money before', 'other broker', 'tried before'], fact: 'past_experience', value: 'had a bad experience previously' },
+      { keys: ['200', '500', '1000', '5000', 'thousand', 'hundred'], fact: 'capital_mentioned', value: userSpeech.match(/[\$£₦]?\d[\d,]*/)?.[0] || 'amount mentioned' },
+      { keys: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'tomorrow', 'next week', 'weekend', 'one hour', 'an hour'], fact: 'timeline', value: userSpeech.match(/monday|tuesday|wednesday|thursday|friday|tomorrow|next week|weekend|one hour|an hour/i)?.[0] || 'time mentioned' },
     ];
 
     for (const pattern of factPatterns) {
       if (pattern.keys.some(k => lower.includes(k))) {
-        state.known_facts[pattern.fact] = pattern.value;
+        if (!state.known_facts[pattern.fact]) { // don't overwrite email/phone/name captured above
+          state.known_facts[pattern.fact] = pattern.value;
+        }
       }
     }
 
-    // Track what AI asked about (from AI's response)
+    // ─────────────────────────────────────────────────────────
+    // Track what AI asked about — prevents asking same question twice
+    // ─────────────────────────────────────────────────────────
     const aiLower = aiText.toLowerCase();
     const topicPatterns = [
-      { keys: ['what.*goal', 'what.*want', 'what.*looking for', 'what.*hoping'], topic: 'goals' },
-      { keys: ['experience', 'traded before', 'how long'], topic: 'experience' },
+      { keys: ['what.*goal', 'what.*want', 'what.*looking for', 'what.*hoping', 'what.*bring you'], topic: 'goals' },
+      { keys: ['experience', 'traded before', 'how long', 'do you trade'], topic: 'experience' },
       { keys: ['what.*stop', 'what.*holding', 'what.*blocking', 'what.*prevent'], topic: 'obstacles' },
       { keys: ['how much', 'capital', 'invest', 'deposit', 'start with'], topic: 'capital' },
-      { keys: ['when.*start', 'timeline', 'thursday.*friday', 'this week'], topic: 'timeline' },
-      { keys: ['whatsapp.*email', 'best.*reach', 'best.*number'], topic: 'contact_preference' },
+      { keys: ['when.*start', 'timeline', 'thursday.*friday', 'this week', 'what time'], topic: 'timeline' },
+      { keys: ['email', 'email address', 'best email', 'send.*to'], topic: 'email' },
+      { keys: ['whatsapp', 'best.*reach', 'best.*number', 'phone number'], topic: 'contact_preference' },
+      { keys: ['what.*income', 'money.*working', 'how.*money', 'income.*look like'], topic: 'income_situation' },
     ];
 
     for (const pattern of topicPatterns) {
@@ -927,10 +993,14 @@ DO NOT re-ask about any known fact. Build on what you know. Advance the conversa
       }
     }
 
-    // Detect hostile/frustrated energy
-    const hostilePatterns = ['boring', 'bored', 'waste', 'annoying', 'stop asking', 'same question', 'already told you', 'said that'];
+    // ─────────────────────────────────────────────────────────
+    // Energy detection — hostile/frustrated signals
+    // ─────────────────────────────────────────────────────────
+    const hostilePatterns = ['boring', 'bored', 'waste', 'annoying', 'stop asking', 'same question',
+      'already told you', 'said that', 'asked me this', 'asked that already', 'i already gave'];
     if (hostilePatterns.some(p => lower.includes(p))) {
       state.prospect_energy = 'hostile';
+      console.log(`[State] ⚠️ Hostile energy detected`);
     }
 
     console.log(`[State] Updated — Known: ${Object.keys(state.known_facts).length} facts, Asked: ${state.asked_topics.length} topics, Energy: ${state.prospect_energy}`);
