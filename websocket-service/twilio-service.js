@@ -1132,15 +1132,14 @@ FORMAT (output exactly this, replacing values with actual numbers):
     const userWordCount = userSpeech.split(' ').length;
     const intentScore = callData.intentScore || 0;
 
-    // ✅ SPRINT 1: Tightened B2C token budgets (JSON scoring removed — no longer need +30 tokens)
-    // Data shows: every 10 extra words ≈ +400ms Claude latency
-    // Sprint 2 will introduce move-based budgets via next_best_action
+    // B2C token budgets — enough room to finish a complete thought without rambling
+    // 90 tokens ≈ 35-40 words — sufficient for a 2-3 sentence sales turn
     if (callData.leadType === 'B2C') {
-      if (userWordCount <= 3) return 35;     // Short reply: quick acknowledgement
-      if (intentScore < 30) return 65;       // Cold: tight discovery question
-      if (intentScore < 60) return 65;       // Warm: probe + one question
-      if (intentScore < 75) return 75;       // Hot: objection handling needs room
-      return 60;                              // SQL: clean close + logistics
+      if (userWordCount <= 3) return 35;     // Very short reply: brief acknowledgement only
+      if (intentScore < 30) return 90;       // Cold: discovery question with context
+      if (intentScore < 60) return 90;       // Warm: probe + one question
+      if (intentScore < 75) return 100;      // Hot: objection needs empathy + reframe + question
+      return 90;                             // SQL: clean close + logistics
     }
 
     // B2B: Allow longer responses (existing logic)
