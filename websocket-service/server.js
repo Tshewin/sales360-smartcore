@@ -290,6 +290,12 @@ app.get('/', (req, res) => {
   });
 });
 
+
+// ADR-002 Week 1 — attach Media Stream routes (additive, echo mode)
+
+const { attachMediaStreamRoutes } = require('./src/realtime/media-stream-routes');
+attachMediaStreamRoutes(server, app, { echoMode: true });
+
 const PORT = process.env.PORT || 8080;
 
 server.listen(PORT, () => {
