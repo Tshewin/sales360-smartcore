@@ -1,0 +1,11 @@
+# Environment variables — never commit
+.env
+.env.local
+.env.production
+
+# Dependencies
+node_modules/
+
+# Logs
+*.log
+npm-debug.log*
