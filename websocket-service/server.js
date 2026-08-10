@@ -291,10 +291,33 @@ app.get('/', (req, res) => {
 });
 
 
-// ADR-002 Week 1 — attach Media Stream routes (additive, echo mode)
+// ══════════════════════════════════════════════════════════
+// ADR-002 WEEK 2 — REALTIME MEDIA STREAMS PIPELINE
+// Replace the Week 1 two-liner with this block.
+// Place this immediately BEFORE the `const PORT = ...` line.
+// ══════════════════════════════════════════════════════════
 
 const { attachMediaStreamRoutes } = require('./src/realtime/media-stream-routes');
-attachMediaStreamRoutes(server, app, { echoMode: true });
+
+// Default system prompt for Media Streams calls
+// In Week 3 this will be dynamically injected per-call from Zoho lead data
+const REALTIME_SYSTEM_PROMPT = process.env.REALTIME_SYSTEM_PROMPT ||
+  require('./SALES360-MASTER-PROMPT-V2').getMasterPrompt?.() ||
+  `You are Sales360 AI — the world's most intelligent sales agent.
+You are on a live phone call. Keep responses to 2-3 SHORT sentences maximum.
+Be warm, direct, and conversational. Never mention you are an AI unless asked.
+Your goal is to qualify the prospect and book a meeting.`;
+
+// Opening line spoken when the call connects
+const REALTIME_OPENING = process.env.REALTIME_OPENING ||
+  "Good afternoon, this is Sales360 AI calling. Do you have a couple of minutes?";
+
+attachMediaStreamRoutes(server, app, {
+  echoMode:     false,          // Week 2: full pipeline
+  systemPrompt: REALTIME_SYSTEM_PROMPT,
+  openingLine:  REALTIME_OPENING,
+});
+
 
 const PORT = process.env.PORT || 8080;
 
