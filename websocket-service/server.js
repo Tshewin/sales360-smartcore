@@ -16,8 +16,17 @@ const { setupAudioRoutes, startCleanupTask } = require('./audio-routes-FALLBACK'
 
 const app = express();
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
+const wss = new WebSocket.Server({ noServer: true });
 
+server.on('upgrade', (request, socket, head) => {
+  const { pathname } = require('url').parse(request.url);
+  // Only handle dashboard connections — /twilio/media is handled by prependListener
+  if (pathname !== '/twilio/media') {
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      wss.emit('connection', ws, request);
+    });
+  }
+});
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
