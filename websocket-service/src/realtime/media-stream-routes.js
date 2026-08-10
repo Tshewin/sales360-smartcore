@@ -70,7 +70,7 @@ function attachMediaStreamRoutes(server, app, opts = {}) {
       res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
-    <Stream url="${wsUrl}" />
+    <Stream url="${wsUrl}" track="both_tracks" />
   </Connect>
 </Response>`);
     });
@@ -81,7 +81,7 @@ function attachMediaStreamRoutes(server, app, opts = {}) {
       res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
-    <Stream url="${wsUrl}" />
+    <Stream url="${wsUrl}" track="both_tracks" />
   </Connect>
 </Response>`);
     });
