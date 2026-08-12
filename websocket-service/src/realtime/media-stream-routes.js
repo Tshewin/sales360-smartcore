@@ -1,6 +1,10 @@
 /**
  * Sales360 Realtime Streaming — Media Stream Routes
  * ADR-002 Week 2
+ *
+ * Uses Connect/Stream for true bidirectional audio.
+ * Connect/Stream keeps the call alive for the stream duration
+ * and allows sending audio back to the caller.
  */
 
 'use strict';
@@ -65,8 +69,9 @@ function attachMediaStreamRoutes(server, app, opts) {
       var wsUrl = 'wss://' + host + '/twilio/media';
       var twiml = '<?xml version="1.0" encoding="UTF-8"?>';
       twiml += '<Response>';
-      twiml += '<Start><Stream url="' + wsUrl + '" track="both_tracks" /></Start>';
-      twiml += '<Pause length="300"/>';
+      twiml += '<Connect>';
+      twiml += '<Stream url="' + wsUrl + '" />';
+      twiml += '</Connect>';
       twiml += '</Response>';
       res.type('text/xml').send(twiml);
     });
@@ -76,8 +81,9 @@ function attachMediaStreamRoutes(server, app, opts) {
       var wsUrl = 'wss://' + host + '/twilio/media';
       var twiml = '<?xml version="1.0" encoding="UTF-8"?>';
       twiml += '<Response>';
-      twiml += '<Start><Stream url="' + wsUrl + '" track="both_tracks" /></Start>';
-      twiml += '<Pause length="300"/>';
+      twiml += '<Connect>';
+      twiml += '<Stream url="' + wsUrl + '" />';
+      twiml += '</Connect>';
       twiml += '</Response>';
       res.type('text/xml').send(twiml);
     });
