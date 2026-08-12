@@ -16,18 +16,20 @@ const { setupAudioRoutes, startCleanupTask } = require('./audio-routes-FALLBACK'
 
 const app = express();
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ noServer: true });
 
+// ── Dashboard WebSocket (noServer — only handles non-media paths) ──
 const wss = new WebSocket.Server({ noServer: true });
 
 server.on('upgrade', function(request, socket, head) {
-  var url = require('url').parse(request.url);
-  if (url.pathname !== '/twilio/media') {
+  var pathname = require('url').parse(request.url).pathname;
+  if (pathname !== '/twilio/media') {
     wss.handleUpgrade(request, socket, head, function(ws) {
       wss.emit('connection', ws, request);
     });
   }
+  // /twilio/media is handled by attachMediaStreamRoutes prependListener
 });
+
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -300,36 +302,22 @@ app.get('/', (req, res) => {
   });
 });
 
+const PORT = process.env.PORT || 8080;
 
-// ══════════════════════════════════════════════════════════
-// ADR-002 WEEK 2 — REALTIME MEDIA STREAMS PIPELINE
-// Replace the Week 1 two-liner with this block.
-// Place this immediately BEFORE the `const PORT = ...` line.
-// ══════════════════════════════════════════════════════════
-
+// ── ADR-002 Week 2 — Realtime Media Streams (must be before server.listen) ──
 const { attachMediaStreamRoutes } = require('./src/realtime/media-stream-routes');
 
-// Default system prompt for Media Streams calls
-// In Week 3 this will be dynamically injected per-call from Zoho lead data
 const REALTIME_SYSTEM_PROMPT = process.env.REALTIME_SYSTEM_PROMPT ||
-  require('./SALES360-MASTER-PROMPT-V2').getMasterPrompt?.() ||
-  `You are Sales360 AI — the world's most intelligent sales agent.
-You are on a live phone call. Keep responses to 2-3 SHORT sentences maximum.
-Be warm, direct, and conversational. Never mention you are an AI unless asked.
-Your goal is to qualify the prospect and book a meeting.`;
+  'You are Sales360 AI — the world\'s most intelligent sales agent. You are on a live phone call. Keep responses to 2-3 SHORT sentences maximum. Be warm, direct, and conversational. Never mention you are an AI unless asked. Your goal is to qualify the prospect and book a meeting.';
 
-// Opening line spoken when the call connects
 const REALTIME_OPENING = process.env.REALTIME_OPENING ||
-  "Good afternoon, this is Sales360 AI calling. Do you have a couple of minutes?";
+  'Good afternoon, this is Sales360 AI calling. Do you have a couple of minutes?';
 
 attachMediaStreamRoutes(server, app, {
-  echoMode:     false,          // Week 2: full pipeline
+  echoMode:     false,
   systemPrompt: REALTIME_SYSTEM_PROMPT,
   openingLine:  REALTIME_OPENING,
 });
-
-
-const PORT = process.env.PORT || 8080;
 
 server.listen(PORT, () => {
   console.log('\n========================================');
