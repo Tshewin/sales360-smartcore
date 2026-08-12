@@ -1,18 +1,6 @@
 /**
  * Sales360 Realtime Streaming — Media Stream Routes
- * ADR-002 Week 2 (updated from Week 1)
- *
- * COLLISION FIX: The existing wss in server.js uses { server } which
- * grabs ALL upgrade events. We resolve this by checking the path
- * INSIDE the existing wss 'connection' handler would never fire for
- * /twilio/media — instead we intercept at the HTTP server 'upgrade'
- * event BEFORE the existing wss sees it, by registering our handler
- * first (prepend listener).
- *
- * Wire-up in server.js — call BEFORE new WebSocket.Server({ server }):
- *
- *   const { attachMediaStreamRoutes } = require('./src/realtime/media-stream-routes');
- *   attachMediaStreamRoutes(server, app, { echoMode: false });
+ * ADR-002 Week 2
  */
 
 'use strict';
@@ -28,7 +16,6 @@ function attachMediaStreamRoutes(server, app, opts = {}) {
 
   const wss = new WebSocket.Server({ noServer: true });
 
-  // ── PREPEND so we intercept /twilio/media BEFORE the dashboard wss ──
   server.prependListener('upgrade', (request, socket, head) => {
     const { pathname } = parse(request.url);
     if (pathname === '/twilio/media') {
@@ -40,69 +27,71 @@ function attachMediaStreamRoutes(server, app, opts = {}) {
 
   wss.on('connection', (ws, request) => {
     const { query } = parse(request.url, true);
-    const callSid = query.CallSid || `media-${Date.now()}`;
+    const callSid = query.CallSid || ('media-' + Date.now());
 
-    console.log(`[MediaStream] New session CallSid=${callSid} echoMode=${echoMode}`);
+    console.log('[MediaStream] New session CallSid=' + callSid + ' echoMode=' + echoMode);
 
     const handler = new MediaStreamHandler(ws, { callSid, echoMode });
     activeSessions.set(callSid, handler);
 
-    handler.on('close', () => {
+    handler.on('close', function() {
       activeSessions.delete(callSid);
-      console.log(`[MediaStream] Session closed CallSid=${callSid} remaining=${activeSessions.size}`);
+      console.log('[MediaStream] Session closed CallSid=' + callSid + ' remaining=' + activeSessions.size);
     });
 
-    handler.on('streamStart', (info) => {
-      console.log(`[MediaStream] Stream started:`, JSON.stringify(info));
+    handler.on('streamStart', function(info) {
+      console.log('[MediaStream] Stream started:', JSON.stringify(info));
     });
 
-    handler.on('transcript', ({ callSid, text, isFinal }) => {
-      if (isFinal) {
-        console.log(`[MediaStream] Final transcript CallSid=${callSid}: "${text}"`);
+    handler.on('transcript', function(data) {
+      if (data.isFinal) {
+        console.log('[MediaStream] Final transcript CallSid=' + data.callSid + ': "' + data.text + '"');
       }
     });
   });
 
   if (app) {
-    app.get('/twilio/media-test', (req, res) => {
-      const host = req.headers.host || 'localhost';
-      const wsUrl = `wss://${host}/twilio/media`;
-      res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Start>
-    <Stream url="${wsUrl}" track="both_tracks" />
-  </Start>
-  <Pause length="60"/>
-</Response>;
+    app.get('/twilio/media-test', function(req, res) {
+      var host = req.headers.host || 'localhost';
+      var wsUrl = 'wss://' + host + '/twilio/media';
+      var twiml = '<?xml version="1.0" encoding="UTF-8"?>';
+      twiml += '<Response>';
+      twiml += '<Start>';
+      twiml += '<Stream url="' + wsUrl + '" track="both_tracks" />';
+      twiml += '</Start>';
+      twiml += '<Pause length="60"/>';
+      twiml += '</Response>';
+      res.type('text/xml').send(twiml);
     });
 
-    app.post('/twilio/media-test', (req, res) => {
-      const host = req.headers.host || 'localhost';
-      const wsUrl = `wss://${host}/twilio/media`;
-      res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Start>
-    <Stream url="${wsUrl}" track="both_tracks" />
-  </Start>
-  <Pause length="60"/>
-</Response>;
+    app.post('/twilio/media-test', function(req, res) {
+      var host = req.headers.host || 'localhost';
+      var wsUrl = 'wss://' + host + '/twilio/media';
+      var twiml = '<?xml version="1.0" encoding="UTF-8"?>';
+      twiml += '<Response>';
+      twiml += '<Start>';
+      twiml += '<Stream url="' + wsUrl + '" track="both_tracks" />';
+      twiml += '</Start>';
+      twiml += '<Pause length="60"/>';
+      twiml += '</Response>';
+      res.type('text/xml').send(twiml);
     });
 
-    app.get('/twilio/media-status', (req, res) => {
-      const sessions = [];
-      for (const [callSid, handler] of activeSessions) {
+    app.get('/twilio/media-status', function(req, res) {
+      var sessions = [];
+      activeSessions.forEach(function(handler, callSid) {
         sessions.push({
-          callSid,
+          callSid: callSid,
           streamSid: handler.streamSid,
           turnCount: handler.turnCount,
           metrics: handler.metrics.summary(),
         });
-      }
-      res.json({ activeSessions: sessions.length, sessions, echoMode });
+      });
+      res.json({ activeSessions: sessions.length, sessions: sessions, echoMode: echoMode });
     });
   }
 
-  console.log(`[MediaStreamRoutes] Attached — /twilio/media (WS) echoMode=${echoMode}`);
+  console.log('[MediaStreamRoutes] Attached — /twilio/media (WS) echoMode=' + echoMode);
   return wss;
 }
 
