@@ -1,107 +1,67 @@
 /**
  * Sales360 Realtime Streaming — AudioPipeline
- * ADR-002 Week 1
- *
- * Handles the μ-law audio plumbing between Twilio Media Streams
- * and our STT/TTS providers.
- *
- * Inbound (caller → STT):
- *   Twilio sends base64-encoded μ-law → decode → forward to STT
- *
- * Outbound (TTS → caller):
- *   ElevenLabs returns raw μ-law bytes → base64 encode → send
- *   to Twilio as Media Stream 'media' messages
- *
- * No FFmpeg anywhere — ElevenLabs outputs ulaw_8000 natively.
+ * ADR-002 Week 2 (debug + format fix)
  */
 
 'use strict';
 
-const config = require('./config');
-
 class AudioPipeline {
-  /**
-   * @param {WebSocket} twilioWs — The Twilio Media Stream WebSocket
-   * @param {string} streamSid — Twilio's stream identifier
-   */
   constructor(twilioWs, streamSid) {
-    this._ws = twilioWs;
-    this._streamSid = streamSid;
-    this._sequenceNumber = 0;
+    this._ws         = twilioWs;
+    this._streamSid  = streamSid;
     this._outboundActive = false;
+    this._chunksSent = 0;
   }
 
-  /**
-   * Decode an inbound Twilio media message to raw μ-law bytes.
-   * @param {object} mediaMsg — Parsed Twilio 'media' event
-   * @returns {Buffer} — Raw μ-law audio
-   */
   decodeInbound(mediaMsg) {
     return Buffer.from(mediaMsg.payload, 'base64');
   }
 
-  /**
-   * Send raw μ-law audio bytes to the caller via Twilio Media Stream.
-   * @param {Buffer} audioChunk — Raw μ-law 8kHz audio from ElevenLabs
-   */
   sendOutbound(audioChunk) {
-    if (!this._ws || this._ws.readyState !== 1) return; // WebSocket.OPEN = 1
+    if (!this._ws || this._ws.readyState !== 1) {
+      console.log('[AudioPipeline] sendOutbound SKIPPED — ws not open. readyState=' + (this._ws ? this._ws.readyState : 'null'));
+      return;
+    }
+    if (!this._streamSid) {
+      console.log('[AudioPipeline] sendOutbound SKIPPED — no streamSid');
+      return;
+    }
 
-    const payload = audioChunk.toString('base64');
-    const msg = {
-      event: 'media',
+    var payload = audioChunk.toString('base64');
+    var msg = JSON.stringify({
+      event:     'media',
       streamSid: this._streamSid,
-      media: {
-        payload,
-      },
-    };
+      media:     { payload: payload },
+    });
 
-    this._ws.send(JSON.stringify(msg));
+    this._ws.send(msg);
+    this._chunksSent++;
     this._outboundActive = true;
+
+    // Log first chunk and every 10th after
+    if (this._chunksSent === 1 || this._chunksSent % 10 === 0) {
+      console.log('[AudioPipeline] Sent chunk #' + this._chunksSent + ' streamSid=' + this._streamSid + ' bytes=' + audioChunk.length);
+    }
   }
 
-  /**
-   * Clear the Twilio audio buffer (for barge-in).
-   * Sends a 'clear' event to stop any queued outbound audio.
-   */
   clearOutbound() {
     if (!this._ws || this._ws.readyState !== 1) return;
-
     this._ws.send(JSON.stringify({
-      event: 'clear',
+      event:     'clear',
       streamSid: this._streamSid,
     }));
     this._outboundActive = false;
+    console.log('[AudioPipeline] Cleared outbound buffer');
   }
 
-  /**
-   * Send a mark event to Twilio for tracking playback position.
-   * @param {string} markName — Identifier for this mark
-   */
-  sendMark(markName) {
-    if (!this._ws || this._ws.readyState !== 1) return;
-
-    this._ws.send(JSON.stringify({
-      event: 'mark',
-      streamSid: this._streamSid,
-      mark: { name: markName },
-    }));
-  }
-
-  /**
-   * Update stream SID (set after Twilio sends the 'start' event).
-   */
   setStreamSid(sid) {
     this._streamSid = sid;
+    console.log('[AudioPipeline] StreamSid set: ' + sid);
   }
 
-  get isActive() {
-    return this._outboundActive;
-  }
-
-  get streamSid() {
-    return this._streamSid;
-  }
+  get isActive()   { return this._outboundActive; }
+  get streamSid()  { return this._streamSid; }
+  get chunksSent() { return this._chunksSent; }
 }
 
 module.exports = AudioPipeline;
