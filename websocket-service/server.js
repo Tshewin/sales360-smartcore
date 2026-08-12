@@ -18,11 +18,12 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ noServer: true });
 
-server.on('upgrade', (request, socket, head) => {
-  const { pathname } = require('url').parse(request.url);
-  // Only handle dashboard connections — /twilio/media is handled by prependListener
-  if (pathname !== '/twilio/media') {
-    wss.handleUpgrade(request, socket, head, (ws) => {
+const wss = new WebSocket.Server({ noServer: true });
+
+server.on('upgrade', function(request, socket, head) {
+  var url = require('url').parse(request.url);
+  if (url.pathname !== '/twilio/media') {
+    wss.handleUpgrade(request, socket, head, function(ws) {
       wss.emit('connection', ws, request);
     });
   }
