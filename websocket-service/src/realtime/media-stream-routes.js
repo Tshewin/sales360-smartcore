@@ -2,18 +2,20 @@
  * Sales360 Realtime Streaming — Media Stream Routes
  * ADR-002 Week 2
  *
- * Uses Connect/Stream for true bidirectional audio.
- * Connect/Stream keeps the call alive for the stream duration
- * and allows sending audio back to the caller.
+ * No prependListener — upgrade handled entirely in server.js
+ * This module just manages the WSS and session lifecycle.
  */
 
 'use strict';
 
-const { parse } = require('url');
 const WebSocket = require('ws');
+const { parse } = require('url');
 const MediaStreamHandler = require('./MediaStreamHandler');
 
 const activeSessions = new Map();
+
+// WSS instance — exported so server.js can pass upgrades to it
+const mediaWss = new WebSocket.Server({ noServer: true });
 
 function attachMediaStreamRoutes(server, app, opts) {
   opts = opts || {};
@@ -21,18 +23,7 @@ function attachMediaStreamRoutes(server, app, opts) {
   var systemPrompt = opts.systemPrompt || '';
   var openingLine  = opts.openingLine  || '';
 
-  var wss = new WebSocket.Server({ noServer: true });
-
-  server.prependListener('upgrade', function(request, socket, head) {
-    var pathname = parse(request.url).pathname;
-    if (pathname === '/twilio/media') {
-      wss.handleUpgrade(request, socket, head, function(ws) {
-        wss.emit('connection', ws, request);
-      });
-    }
-  });
-
-  wss.on('connection', function(ws, request) {
+  mediaWss.on('connection', function(ws, request) {
     var query   = parse(request.url, true).query;
     var callSid = query.CallSid || ('media-' + Date.now());
 
@@ -103,7 +94,6 @@ function attachMediaStreamRoutes(server, app, opts) {
   }
 
   console.log('[MediaStreamRoutes] Attached — /twilio/media (WS) echoMode=' + echoMode);
-  return wss;
 }
 
-module.exports = { attachMediaStreamRoutes, activeSessions };
+module.exports = { attachMediaStreamRoutes, mediaWss, activeSessions };
