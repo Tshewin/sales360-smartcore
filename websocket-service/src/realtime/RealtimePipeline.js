@@ -1,11 +1,6 @@
 /**
  * Sales360 Realtime Streaming — RealtimePipeline
- * ADR-002 Week 2 (revised)
- *
- * Fixes:
- * 1. Opening line delayed 1s after stream start to ensure streamSid is ready
- * 2. Barge-in suppressed during opening line delivery
- * 3. _agentSpeaking only set true when first audio chunk actually sends
+ * ADR-002 Week 2 (revised — immediate opening, no delay)
  */
 
 'use strict';
@@ -21,43 +16,40 @@ const config               = require('./config');
 class RealtimePipeline extends EventEmitter {
   constructor(opts) {
     super();
+    opts = opts || {};
     this.callSid        = opts.callSid || 'unknown';
     this.systemPrompt   = opts.systemPrompt || '';
     this.openingLine    = opts.openingLine || '';
     this._audio         = opts.audioPipeline || null;
 
-    this._stt             = null;
-    this._currentCtx      = null;
-    this._metrics         = new RealtimeMetrics(this.callSid);
-    this._history         = [];
-    this._turnCount       = 0;
-    this._agentSpeaking   = false;
-    this._openingDone     = false;  // suppress barge-in until opening is delivered
-    this._ready           = false;
-    this._apiKey          = process.env.ANTHROPIC_API_KEY || '';
+    this._stt           = null;
+    this._currentCtx    = null;
+    this._metrics       = new RealtimeMetrics(this.callSid);
+    this._history       = [];
+    this._turnCount     = 0;
+    this._agentSpeaking = false;
+    this._openingDone   = false;
+    this._ready         = false;
+    this._apiKey        = process.env.ANTHROPIC_API_KEY || '';
   }
-
-  // ─── Lifecycle ───────────────────────────────────────────
 
   async start() {
     console.log('[Pipeline] Starting CallSid=' + this.callSid);
 
+    var self = this;
     this._stt = new DeepgramSTT();
-    this._stt.on('interim',      function(r) { this._onInterim(r); }.bind(this));
-    this._stt.on('final',        function(r) { this._onFinal(r); }.bind(this));
-    this._stt.on('utteranceEnd', function()  { this._onUtteranceEnd(); }.bind(this));
-    this._stt.on('error',        function(e) { this.emit('error', Object.assign({}, e, { context: 'stt' })); }.bind(this));
+    this._stt.on('interim',      function(r) { self._onInterim(r); });
+    this._stt.on('final',        function(r) { self._onFinal(r); });
+    this._stt.on('utteranceEnd', function()  { self._onUtteranceEnd(); });
+    this._stt.on('error',        function(e) { self.emit('error', Object.assign({}, e, { context: 'stt' })); });
 
     await this._stt.connect();
     this._ready = true;
     console.log('[Pipeline] STT connected CallSid=' + this.callSid);
 
-    // Delay opening line by 1 second to ensure stream is fully ready
+    // Fire opening line immediately — no delay
     if (this.openingLine) {
-      var self = this;
-      setTimeout(function() {
-        self._speakText(self.openingLine);
-      }, 1000);
+      this._speakText(this.openingLine);
     } else {
       this._openingDone = true;
     }
@@ -66,7 +58,7 @@ class RealtimePipeline extends EventEmitter {
   receiveAudio(audioChunk) {
     if (!this._ready || !this._stt) return;
 
-    // Only allow barge-in after opening line is fully delivered
+    // Only barge-in after opening is fully delivered
     if (this._agentSpeaking && this._openingDone && this._currentCtx && !this._currentCtx.aborted) {
       this._handleBargeIn();
     }
@@ -84,8 +76,6 @@ class RealtimePipeline extends EventEmitter {
     var summary = this._metrics.summary();
     if (summary) console.log('[Pipeline] Metrics:', JSON.stringify(summary));
   }
-
-  // ─── STT handlers ────────────────────────────────────────
 
   _onInterim(data) {
     if (!this._metrics.currentTurn) {
@@ -107,23 +97,21 @@ class RealtimePipeline extends EventEmitter {
     if (this._stt) this._stt.sendAudio(Buffer.alloc(0));
   }
 
-  // ─── LLM → TTS pipeline ──────────────────────────────────
-
   async _respond(userText) {
     if (this._currentCtx) this._currentCtx.abort('new-turn');
 
     this._turnCount++;
     var turnId = this.callSid + '-t' + this._turnCount;
+    var self   = this;
     this._currentCtx = new GenerationContext(turnId);
     this.emit('turn:start', { turnId: turnId, callSid: this.callSid });
 
     this._history.push({ role: 'user', content: userText });
     if (this._history.length > 20) this._history = this._history.slice(-20);
 
-    var tts      = new ElevenLabsWS(this._currentCtx);
-    var chunker  = new SpeakableTextChunker(this._currentCtx);
+    var tts     = new ElevenLabsWS(this._currentCtx);
+    var chunker = new SpeakableTextChunker(this._currentCtx);
     var fullResponse = '';
-    var self = this;
 
     chunker.on('chunk', function(data) {
       if (self._currentCtx.aborted) return;
@@ -146,14 +134,13 @@ class RealtimePipeline extends EventEmitter {
     tts.on('done', function() {
       self._agentSpeaking = false;
       self._metrics.mark('t9');
-      var turnMetrics = self._metrics.endTurn();
+      var m = self._metrics.endTurn();
       self._currentCtx.complete();
-      self.emit('turn:end', { turnId: turnId, callSid: self.callSid, metrics: turnMetrics });
+      self.emit('turn:end', { turnId: turnId, callSid: self.callSid, metrics: m });
     });
 
     tts.on('error', function(e) {
       console.error('[Pipeline] TTS error:', e.error && e.error.message);
-      self.emit('error', Object.assign({}, e, { context: 'tts', turnId: turnId }));
     });
 
     try {
@@ -161,16 +148,13 @@ class RealtimePipeline extends EventEmitter {
       this._metrics.mark('t3');
     } catch (err) {
       console.error('[Pipeline] TTS connect failed:', err.message);
-      this.emit('error', { error: err, context: 'tts-connect', turnId: turnId });
       return;
     }
 
     try {
-      var signal = this._currentCtx.signal;
-
       var response = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
-        signal: signal,
+        signal: this._currentCtx.signal,
         headers: {
           'Content-Type':      'application/json',
           'x-api-key':         this._apiKey,
@@ -197,10 +181,10 @@ class RealtimePipeline extends EventEmitter {
 
       while (true) {
         if (this._currentCtx.aborted) break;
-        var result = await reader.read();
-        if (result.done) break;
+        var chunk = await reader.read();
+        if (chunk.done) break;
 
-        buffer += decoder.decode(result.value, { stream: true });
+        buffer += decoder.decode(chunk.value, { stream: true });
         var lines = buffer.split('\n');
         buffer = lines.pop();
 
@@ -212,13 +196,9 @@ class RealtimePipeline extends EventEmitter {
           try {
             var evt = JSON.parse(data);
             if (evt.type === 'content_block_delta' && evt.delta && evt.delta.type === 'text_delta') {
-              var token = evt.delta.text;
-              if (firstToken) {
-                firstToken = false;
-                this._metrics.mark('t4');
-              }
-              fullResponse += token;
-              chunker.write(token);
+              if (firstToken) { firstToken = false; this._metrics.mark('t4'); }
+              fullResponse += evt.delta.text;
+              chunker.write(evt.delta.text);
             }
           } catch(e) {}
         }
@@ -232,7 +212,7 @@ class RealtimePipeline extends EventEmitter {
 
     } catch (err) {
       if (err.name === 'AbortError' || (this._currentCtx && this._currentCtx.aborted)) {
-        console.log('[Pipeline] Claude aborted (barge-in) turn=' + turnId);
+        console.log('[Pipeline] Claude aborted turn=' + turnId);
       } else {
         console.error('[Pipeline] Claude error:', err.message);
         this.emit('error', { error: err, context: 'llm', turnId: turnId });
@@ -240,12 +220,10 @@ class RealtimePipeline extends EventEmitter {
     }
   }
 
-  // ─── Opening line ─────────────────────────────────────────
-
   async _speakText(text) {
-    var self = this;
-    var ctx  = new GenerationContext(this.callSid + '-opening');
-    var tts  = new ElevenLabsWS(ctx);
+    var self    = this;
+    var ctx     = new GenerationContext(this.callSid + '-opening');
+    var tts     = new ElevenLabsWS(ctx);
     var audioSent = false;
 
     tts.on('audio', function(data) {
@@ -254,22 +232,21 @@ class RealtimePipeline extends EventEmitter {
         if (!audioSent) {
           audioSent = true;
           self._agentSpeaking = true;
-          console.log('[Pipeline] Opening line audio flowing CallSid=' + self.callSid);
+          console.log('[Pipeline] Opening audio flowing CallSid=' + self.callSid);
         }
       }
     });
 
     tts.on('done', function() {
       self._agentSpeaking = false;
-      self._openingDone   = true;   // NOW allow barge-in
+      self._openingDone   = true;
       ctx.complete();
       console.log('[Pipeline] Opening line delivered CallSid=' + self.callSid);
-      // Add to history so Claude has context
       self._history.push({ role: 'assistant', content: text });
     });
 
     tts.on('error', function(e) {
-      self._openingDone = true;  // unblock even on error
+      self._openingDone = true;
       console.error('[Pipeline] Opening TTS error:', e.error && e.error.message);
     });
 
@@ -277,14 +254,12 @@ class RealtimePipeline extends EventEmitter {
       await tts.connect();
       tts.send(text);
       tts.flush();
-      console.log('[Pipeline] Opening line sent to TTS CallSid=' + this.callSid);
+      console.log('[Pipeline] Opening sent to TTS CallSid=' + this.callSid);
     } catch (err) {
-      this._openingDone = true;  // unblock on connect failure
-      console.error('[Pipeline] Opening line connect failed:', err.message);
+      this._openingDone = true;
+      console.error('[Pipeline] Opening connect failed:', err.message);
     }
   }
-
-  // ─── Barge-in ─────────────────────────────────────────────
 
   _handleBargeIn() {
     console.log('[Pipeline] Barge-in CallSid=' + this.callSid);
@@ -293,8 +268,6 @@ class RealtimePipeline extends EventEmitter {
     this._currentCtx.abort('barge-in');
     this.emit('barge-in', { callSid: this.callSid });
   }
-
-  // ─── Accessors ────────────────────────────────────────────
 
   get metrics()   { return this._metrics; }
   get history()   { return this._history; }
