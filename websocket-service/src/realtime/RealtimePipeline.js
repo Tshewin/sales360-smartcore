@@ -1,6 +1,6 @@
 /**
  * Sales360 Realtime Streaming — RealtimePipeline
- * ADR-002 Week 2 (revised — immediate opening, no delay)
+ * ADR-002 Week 2 (barge-in fix — only interrupt active agent response)
  */
 
 'use strict';
@@ -22,16 +22,20 @@ class RealtimePipeline extends EventEmitter {
     this.openingLine    = opts.openingLine || '';
     this._audio         = opts.audioPipeline || null;
 
-    this._stt           = null;
-    this._currentCtx    = null;
-    this._metrics       = new RealtimeMetrics(this.callSid);
-    this._history       = [];
-    this._turnCount     = 0;
-    this._agentSpeaking = false;
-    this._openingDone   = false;
-    this._ready         = false;
-    this._apiKey        = process.env.ANTHROPIC_API_KEY || '';
+    this._stt             = null;
+    this._currentCtx      = null;
+    this._metrics         = new RealtimeMetrics(this.callSid);
+    this._history         = [];
+    this._turnCount       = 0;
+
+    // State flags
+    this._openingDone     = false;  // true after opening line fully delivered
+    this._agentResponding = false;  // true only when Claude response audio is playing
+    this._ready           = false;
+    this._apiKey          = process.env.ANTHROPIC_API_KEY || '';
   }
+
+  // ─── Lifecycle ───────────────────────────────────────────
 
   async start() {
     console.log('[Pipeline] Starting CallSid=' + this.callSid);
@@ -47,9 +51,8 @@ class RealtimePipeline extends EventEmitter {
     this._ready = true;
     console.log('[Pipeline] STT connected CallSid=' + this.callSid);
 
-    // Fire opening line immediately — no delay
     if (this.openingLine) {
-      this._speakText(this.openingLine);
+      this._speakOpening(this.openingLine);
     } else {
       this._openingDone = true;
     }
@@ -58,8 +61,16 @@ class RealtimePipeline extends EventEmitter {
   receiveAudio(audioChunk) {
     if (!this._ready || !this._stt) return;
 
-    // Only barge-in after opening is fully delivered
-    if (this._agentSpeaking && this._openingDone && this._currentCtx && !this._currentCtx.aborted) {
+    // Barge-in ONLY when:
+    // 1. Opening line is fully delivered
+    // 2. Agent is actively playing a response (not just listening)
+    // 3. There is an active generation context to abort
+    if (
+      this._openingDone &&
+      this._agentResponding &&
+      this._currentCtx &&
+      !this._currentCtx.aborted
+    ) {
       this._handleBargeIn();
     }
 
@@ -77,6 +88,8 @@ class RealtimePipeline extends EventEmitter {
     if (summary) console.log('[Pipeline] Metrics:', JSON.stringify(summary));
   }
 
+  // ─── STT handlers ────────────────────────────────────────
+
   _onInterim(data) {
     if (!this._metrics.currentTurn) {
       this._metrics.startTurn();
@@ -87,9 +100,17 @@ class RealtimePipeline extends EventEmitter {
 
   _onFinal(data) {
     if (!data.text.trim()) return;
+
+    // Ignore transcripts during opening line delivery
+    if (!this._openingDone) {
+      console.log('[Pipeline] Ignoring transcript during opening: "' + data.text + '"');
+      return;
+    }
+
     this._metrics.mark('t2');
     this._metrics.annotate({ transcript: data.text });
     this.emit('turn:transcript', { callSid: this.callSid, text: data.text, isFinal: true });
+    console.log('[Pipeline] Responding to: "' + data.text + '"');
     this._respond(data.text);
   }
 
@@ -97,13 +118,17 @@ class RealtimePipeline extends EventEmitter {
     if (this._stt) this._stt.sendAudio(Buffer.alloc(0));
   }
 
+  // ─── LLM → TTS pipeline ──────────────────────────────────
+
   async _respond(userText) {
     if (this._currentCtx) this._currentCtx.abort('new-turn');
 
     this._turnCount++;
     var turnId = this.callSid + '-t' + this._turnCount;
     var self   = this;
-    this._currentCtx = new GenerationContext(turnId);
+    this._currentCtx    = new GenerationContext(turnId);
+    this._agentResponding = false;  // will flip true when audio starts flowing
+
     this.emit('turn:start', { turnId: turnId, callSid: this.callSid });
 
     this._history.push({ role: 'user', content: userText });
@@ -126,20 +151,23 @@ class RealtimePipeline extends EventEmitter {
       if (data.index === 0) {
         self._metrics.mark('t7');
         self._metrics.mark('t8');
-        self._agentSpeaking = true;
+        self._agentResponding = true;  // NOW enable barge-in
+        console.log('[Pipeline] Agent response audio flowing turn=' + turnId);
       }
       if (self._audio) self._audio.sendOutbound(data.chunk);
     });
 
     tts.on('done', function() {
-      self._agentSpeaking = false;
+      self._agentResponding = false;  // response complete — disable barge-in
       self._metrics.mark('t9');
       var m = self._metrics.endTurn();
       self._currentCtx.complete();
+      console.log('[Pipeline] Turn complete turn=' + turnId);
       self.emit('turn:end', { turnId: turnId, callSid: self.callSid, metrics: m });
     });
 
     tts.on('error', function(e) {
+      self._agentResponding = false;
       console.error('[Pipeline] TTS error:', e.error && e.error.message);
     });
 
@@ -174,9 +202,9 @@ class RealtimePipeline extends EventEmitter {
         throw new Error('Claude API ' + response.status + ': ' + errText);
       }
 
-      var reader    = response.body.getReader();
-      var decoder   = new TextDecoder();
-      var buffer    = '';
+      var reader     = response.body.getReader();
+      var decoder    = new TextDecoder();
+      var buffer     = '';
       var firstToken = true;
 
       while (true) {
@@ -220,33 +248,26 @@ class RealtimePipeline extends EventEmitter {
     }
   }
 
-  async _speakText(text) {
-    var self    = this;
-    var ctx     = new GenerationContext(this.callSid + '-opening');
-    var tts     = new ElevenLabsWS(ctx);
-    var audioSent = false;
+  // ─── Opening line ─────────────────────────────────────────
+
+  async _speakOpening(text) {
+    var self = this;
+    var ctx  = new GenerationContext(this.callSid + '-opening');
+    var tts  = new ElevenLabsWS(ctx);
 
     tts.on('audio', function(data) {
-      if (self._audio) {
-        self._audio.sendOutbound(data.chunk);
-        if (!audioSent) {
-          audioSent = true;
-          self._agentSpeaking = true;
-          console.log('[Pipeline] Opening audio flowing CallSid=' + self.callSid);
-        }
-      }
+      if (self._audio) self._audio.sendOutbound(data.chunk);
     });
 
     tts.on('done', function() {
-      self._agentSpeaking = false;
-      self._openingDone   = true;
       ctx.complete();
-      console.log('[Pipeline] Opening line delivered CallSid=' + self.callSid);
+      self._openingDone = true;  // NOW accept transcripts and enable pipeline
       self._history.push({ role: 'assistant', content: text });
+      console.log('[Pipeline] Opening line delivered CallSid=' + self.callSid);
     });
 
     tts.on('error', function(e) {
-      self._openingDone = true;
+      self._openingDone = true;  // unblock even on error
       console.error('[Pipeline] Opening TTS error:', e.error && e.error.message);
     });
 
@@ -261,13 +282,17 @@ class RealtimePipeline extends EventEmitter {
     }
   }
 
+  // ─── Barge-in ─────────────────────────────────────────────
+
   _handleBargeIn() {
     console.log('[Pipeline] Barge-in CallSid=' + this.callSid);
-    this._agentSpeaking = false;
+    this._agentResponding = false;
     if (this._audio) this._audio.clearOutbound();
     this._currentCtx.abort('barge-in');
     this.emit('barge-in', { callSid: this.callSid });
   }
+
+  // ─── Accessors ────────────────────────────────────────────
 
   get metrics()   { return this._metrics; }
   get history()   { return this._history; }
