@@ -1,6 +1,11 @@
 /**
  * Sales360 Realtime Streaming — RealtimePipeline
- * ADR-002 Week 2 (keepalive fix — silence frames keep stream open)
+ * ADR-002 Week 2 — FINAL
+ *
+ * Key fixes:
+ * 1. Deepgram paused while agent is responding — prevents false barge-in
+ * 2. Keepalive silence frames only sent to Twilio, NOT to Deepgram
+ * 3. Barge-in only fires on real caller speech, not silence artifacts
  */
 
 'use strict';
@@ -13,7 +18,7 @@ const GenerationContext    = require('./GenerationContext');
 const RealtimeMetrics      = require('./RealtimeMetrics');
 const config               = require('./config');
 
-// 20ms of μ-law silence (160 bytes at 8kHz) — keeps Twilio stream alive
+// 20ms of μ-law silence — keeps Twilio stream alive
 var SILENCE_FRAME = Buffer.alloc(160, 0xFF);
 
 class RealtimePipeline extends EventEmitter {
@@ -31,7 +36,7 @@ class RealtimePipeline extends EventEmitter {
     this._history         = [];
     this._turnCount       = 0;
     this._openingDone     = false;
-    this._agentResponding = false;
+    this._agentResponding = false;  // true = agent speaking, pause STT
     this._ready           = false;
     this._apiKey          = process.env.ANTHROPIC_API_KEY || '';
     this._keepAliveTimer  = null;
@@ -53,7 +58,6 @@ class RealtimePipeline extends EventEmitter {
     this._ready = true;
     console.log('[Pipeline] STT connected CallSid=' + this.callSid);
 
-    // Start keepalive — send silence frames every 20ms to keep Twilio stream open
     this._startKeepalive();
 
     if (this.openingLine) {
@@ -66,6 +70,7 @@ class RealtimePipeline extends EventEmitter {
   _startKeepalive() {
     var self = this;
     this._keepAliveTimer = setInterval(function() {
+      // Send silence to Twilio ONLY — never to Deepgram
       if (self._audio && !self._agentResponding) {
         self._audio.sendOutbound(SILENCE_FRAME);
       }
@@ -83,15 +88,24 @@ class RealtimePipeline extends EventEmitter {
   receiveAudio(audioChunk) {
     if (!this._ready || !this._stt) return;
 
-    if (
-      this._openingDone &&
-      this._agentResponding &&
-      this._currentCtx &&
-      !this._currentCtx.aborted
-    ) {
-      this._handleBargeIn();
+    // While agent is responding — barge-in detection only, don't send to STT
+    if (this._agentResponding) {
+      // Simple energy check — if caller is speaking loudly, that's a barge-in
+      // μ-law silence = 0xFF, speech has varied byte values
+      var nonSilenceBytes = 0;
+      for (var i = 0; i < audioChunk.length; i++) {
+        if (audioChunk[i] !== 0xFF && audioChunk[i] !== 0x7F) nonSilenceBytes++;
+      }
+      var speechRatio = nonSilenceBytes / audioChunk.length;
+
+      if (speechRatio > 0.3 && this._openingDone && this._currentCtx && !this._currentCtx.aborted) {
+        console.log('[Pipeline] Speech detected during response (ratio=' + speechRatio.toFixed(2) + ') — barge-in');
+        this._handleBargeIn();
+      }
+      return; // Don't forward to Deepgram while agent is speaking
     }
 
+    // Agent not speaking — forward to Deepgram normally
     this._stt.sendAudio(audioChunk);
   }
 
@@ -169,18 +183,18 @@ class RealtimePipeline extends EventEmitter {
       if (data.index === 0) {
         self._metrics.mark('t7');
         self._metrics.mark('t8');
-        self._agentResponding = true;
-        console.log('[Pipeline] Agent response audio flowing turn=' + turnId);
+        self._agentResponding = true;  // Pause STT, enable energy-based barge-in
+        console.log('[Pipeline] Agent speaking — STT paused turn=' + turnId);
       }
       if (self._audio) self._audio.sendOutbound(data.chunk);
     });
 
     tts.on('done', function() {
-      self._agentResponding = false;
+      self._agentResponding = false;  // Resume STT
       self._metrics.mark('t9');
       var m = self._metrics.endTurn();
       self._currentCtx.complete();
-      console.log('[Pipeline] Turn complete turn=' + turnId);
+      console.log('[Pipeline] Turn complete — STT resumed turn=' + turnId);
       self.emit('turn:end', { turnId: turnId, callSid: self.callSid, metrics: m });
     });
 
@@ -281,7 +295,7 @@ class RealtimePipeline extends EventEmitter {
       ctx.complete();
       self._openingDone = true;
       self._history.push({ role: 'assistant', content: text });
-      console.log('[Pipeline] Opening line delivered CallSid=' + self.callSid);
+      console.log('[Pipeline] Opening line delivered — listening for prospect');
     });
 
     tts.on('error', function(e) {
