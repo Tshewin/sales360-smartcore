@@ -13,7 +13,7 @@ const activeSessions = new Map();
 
 function attachMediaStreamRoutes(server, app, opts) {
   opts = opts || {};
-  var echoMode = opts.echoMode !== undefined ? opts.echoMode : false;
+  var echoMode     = opts.echoMode !== undefined ? opts.echoMode : false;
   var systemPrompt = opts.systemPrompt || '';
   var openingLine  = opts.openingLine  || '';
 
@@ -66,7 +66,7 @@ function attachMediaStreamRoutes(server, app, opts) {
       var twiml = '<?xml version="1.0" encoding="UTF-8"?>';
       twiml += '<Response>';
       twiml += '<Start><Stream url="' + wsUrl + '" track="both_tracks" /></Start>';
-      twiml += '<Pause length="60"/>';
+      twiml += '<Pause length="300"/>';
       twiml += '</Response>';
       res.type('text/xml').send(twiml);
     });
@@ -77,7 +77,7 @@ function attachMediaStreamRoutes(server, app, opts) {
       var twiml = '<?xml version="1.0" encoding="UTF-8"?>';
       twiml += '<Response>';
       twiml += '<Start><Stream url="' + wsUrl + '" track="both_tracks" /></Start>';
-      twiml += '<Pause length="60"/>';
+      twiml += '<Pause length="300"/>';
       twiml += '</Response>';
       res.type('text/xml').send(twiml);
     });
