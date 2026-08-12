@@ -69,10 +69,11 @@ function attachMediaStreamRoutes(server, app, opts = {}) {
       const wsUrl = `wss://${host}/twilio/media`;
       res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Connect>
+  <Start>
     <Stream url="${wsUrl}" track="both_tracks" />
-  </Connect>
-</Response>`);
+  </Start>
+  <Pause length="60"/>
+</Response>;
     });
 
     app.post('/twilio/media-test', (req, res) => {
@@ -80,10 +81,11 @@ function attachMediaStreamRoutes(server, app, opts = {}) {
       const wsUrl = `wss://${host}/twilio/media`;
       res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Connect>
+  <Start>
     <Stream url="${wsUrl}" track="both_tracks" />
-  </Connect>
-</Response>`);
+  </Start>
+  <Pause length="60"/>
+</Response>;
     });
 
     app.get('/twilio/media-status', (req, res) => {
