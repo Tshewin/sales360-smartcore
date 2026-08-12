@@ -8,50 +8,40 @@ const http = require('http');
 const WebSocket = require('ws');
 const cors = require('cors');
 
-// ✅ IMPORT STORAGE SERVICE **FIRST** (BEFORE USING IT!)
 const StorageService = require('./storage-service');
-
-// ✅ IMPORT AUDIO ROUTES
 const { setupAudioRoutes, startCleanupTask } = require('./audio-routes-FALLBACK');
 
 const app = express();
 const server = http.createServer(app);
 
-// ── Dashboard WebSocket (noServer — only handles non-media paths) ──
+// Dashboard WebSocket — noServer so it only handles non-media paths
 const wss = new WebSocket.Server({ noServer: true });
 
 server.on('upgrade', function(request, socket, head) {
-  var pathname = require('url').parse(request.url).pathname;
-  if (pathname !== '/twilio/media') {
+  var url = require('url').parse(request.url);
+  if (url.pathname !== '/twilio/media') {
     wss.handleUpgrade(request, socket, head, function(ws) {
       wss.emit('connection', ws, request);
     });
   }
-  // /twilio/media is handled by attachMediaStreamRoutes prependListener
+  // /twilio/media handled exclusively by attachMediaStreamRoutes prependListener
 });
 
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ✅ NOW CREATE STORAGE SERVICE (AFTER IMPORTING IT!)
 const storageService = new StorageService();
-
-// ✅ SETUP AUDIO ROUTES
 setupAudioRoutes(app, storageService);
-
-// ✅ START CLEANUP TASK
 startCleanupTask(storageService);
-
-// ... rest of your server.js
 
 const API_KEY = process.env.WEBSOCKET_API_KEY || '348bfe2c06cfb611c6240a83b8b850f4683908d2eb05d450b01b5a760c3c3dee';
 const clients = new Set();
 
-wss.on('connection', (ws, req) => {
+wss.on('connection', function(ws, req) {
   console.log('[WebSocket] New connection attempt');
 
-  ws.on('message', (message) => {
+  ws.on('message', function(message) {
     try {
       const data = JSON.parse(message);
 
@@ -79,18 +69,18 @@ wss.on('connection', (ws, req) => {
       }
 
       broadcast(data);
-      
+
     } catch (error) {
       console.error('[WebSocket] Error processing message:', error);
     }
   });
 
-  ws.on('close', () => {
+  ws.on('close', function() {
     clients.delete(ws);
     console.log('[WebSocket] Client disconnected. Total clients:', clients.size);
   });
 
-  ws.on('error', (error) => {
+  ws.on('error', function(error) {
     console.error('[WebSocket] WebSocket error:', error);
     clients.delete(ws);
   });
@@ -99,8 +89,7 @@ wss.on('connection', (ws, req) => {
 function broadcast(data) {
   const message = JSON.stringify(data);
   let successCount = 0;
-  
-  clients.forEach((client) => {
+  clients.forEach(function(client) {
     if (client.readyState === WebSocket.OPEN && client.authenticated) {
       try {
         client.send(message);
@@ -110,8 +99,7 @@ function broadcast(data) {
       }
     }
   });
-  
-  console.log(`[WebSocket] Broadcast: ${data.type} to ${successCount} clients`);
+  console.log('[WebSocket] Broadcast: ' + data.type + ' to ' + successCount + ' clients');
 }
 
 const wsServer = {
@@ -119,144 +107,74 @@ const wsServer = {
   clients: clients
 };
 
-// ══════════════════════════════════════════════════════════
-// PHASE 2A: ELEVENLABS VOICE CLONING INTEGRATION
-// ══════════════════════════════════════════════════════════
-
-// Initialize ElevenLabs service FIRST
+// ElevenLabs
 const ElevenLabsService = require('./elevenlabs-dynamic-service');
 const elevenLabsService = new ElevenLabsService();
+console.log('[ElevenLabs] Service initialized');
 
-console.log('[ElevenLabs] ✅ Service initialized');
-console.log(`[ElevenLabs] Default voice (Chuks): ${process.env.ELEVENLABS_DEFAULT_VOICE_ID || 'lJd1hi6nFFWkrcDH9i3a'}`);
-console.log(`[ElevenLabs] Audio storage: ${process.env.AUDIO_STORAGE_PROVIDER || 'datauri'}`);
-
-// ══════════════════════════════════════════════════════════
-// PHASE 3C: ZOHO CRM INTEGRATION
-// ══════════════════════════════════════════════════════════
-
-// Initialize Zoho CRM service
+// Zoho
 const ZohoService = require('./zoho-service');
 const zohoService = new ZohoService();
 
-// Initialize Twilio service with ElevenLabs AND Zoho
+// Twilio
 const TwilioService = require('./twilio-service');
 const twilioService = new TwilioService(elevenLabsService, zohoService);
-
 console.log('[Twilio Service] Using ElevenLabs for voice synthesis');
 
-// Load call routes with updated services
+// Call routes
 const setupCallRoutes = require('./call-routes');
 const callRoutes = setupCallRoutes(wsServer, twilioService, elevenLabsService);
-
 app.use(callRoutes);
-
 console.log('[Setup] Call routes mounted with ElevenLabs voice');
 
-// ══════════════════════════════════════════════════════════
-// ZOHO API ENDPOINTS
-// ══════════════════════════════════════════════════════════
-
-// Test endpoint - verify Zoho connection
-app.get('/api/zoho/test', async (req, res) => {
+// Zoho endpoints
+app.get('/api/zoho/test', async function(req, res) {
   if (!zohoService.isEnabled()) {
-    return res.status(503).json({
-      success: false,
-      zoho_enabled: false,
-      message: 'Zoho CRM integration is disabled (missing credentials)'
-    });
+    return res.status(503).json({ success: false, zoho_enabled: false, message: 'Zoho disabled' });
   }
-
   try {
     const token = await zohoService.getAccessToken();
-    res.json({
-      success: true,
-      zoho_enabled: true,
-      token_acquired: !!token,
-      message: 'Zoho CRM integration active'
-    });
+    res.json({ success: true, zoho_enabled: true, token_acquired: !!token });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// Fetch lead data (used by dashboard or external systems)
-app.get('/api/zoho/lead/:leadId', async (req, res) => {
+app.get('/api/zoho/lead/:leadId', async function(req, res) {
   try {
-    const { leadId } = req.params;
-    const leadData = await zohoService.fetchLeadForCall(leadId);
-    
-    if (!leadData) {
-      return res.status(404).json({
-        success: false,
-        error: 'Lead not found or Zoho integration disabled'
-      });
-    }
-
-    res.json({
-      success: true,
-      lead: leadData
-    });
+    const leadData = await zohoService.fetchLeadForCall(req.params.leadId);
+    if (!leadData) return res.status(404).json({ success: false, error: 'Lead not found' });
+    res.json({ success: true, lead: leadData });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// Update IntentScore (can be called externally if needed)
-app.post('/api/zoho/update-score', async (req, res) => {
+app.post('/api/zoho/update-score', async function(req, res) {
   try {
     const { leadId, score, signal, signalType } = req.body;
-    
     if (!leadId || score === undefined) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing required fields: leadId, score'
-      });
+      return res.status(400).json({ success: false, error: 'Missing leadId or score' });
     }
-
     const success = await zohoService.updateIntentScore(leadId, score, signal, signalType);
-    
-    res.json({
-      success,
-      message: success ? 'IntentScore updated in Zoho' : 'Update failed'
-    });
+    res.json({ success: success, message: success ? 'IntentScore updated' : 'Update failed' });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// ══════════════════════════════════════════════════════════
-
-app.get('/health', (req, res) => {
+app.get('/health', function(req, res) {
   res.json({
     status: 'healthy',
     timestamp: new Date().toISOString(),
-    websocket: {
-      active: true,
-      clients: clients.size
-    },
-    twilio: {
-      active: true,
-      phoneNumber: process.env.TWILIO_PHONE_NUMBER || 'not configured'
-    },
+    websocket: { active: true, clients: clients.size },
+    twilio: { active: true, phoneNumber: process.env.TWILIO_PHONE_NUMBER || 'not configured' },
     elevenlabs: {
       active: !!process.env.ELEVENLABS_API_KEY,
       voiceId: process.env.ELEVENLABS_DEFAULT_VOICE_ID || 'lJd1hi6nFFWkrcDH9i3a',
       storageProvider: process.env.AUDIO_STORAGE_PROVIDER || 'datauri'
     },
-    zoho: {
-      active: zohoService.isEnabled(),
-      apiDomain: process.env.ZOHO_API_DOMAIN || 'not set'
-    },
+    zoho: { active: zohoService.isEnabled(), apiDomain: process.env.ZOHO_API_DOMAIN || 'not set' },
     storage: {
       provider: process.env.AUDIO_STORAGE_PROVIDER || 'not set',
       r2AccountId: process.env.R2_ACCOUNT_ID ? 'set' : 'NOT SET',
@@ -268,49 +186,31 @@ app.get('/health', (req, res) => {
   });
 });
 
-app.get('/', (req, res) => {
+app.get('/', function(req, res) {
   res.json({
     service: 'Sales360 SmartCore',
-    version: '2.2.0-zoho',
-    features: [
-      'WebSocket Real-time Sync', 
-      'Twilio Phone Integration',
-      'ElevenLabs Voice Cloning (Chuks)',
-      'Zoho CRM Integration'
-    ],
+    version: '2.2.0-realtime',
+    features: ['WebSocket Real-time Sync', 'Twilio Phone Integration', 'ElevenLabs Voice Cloning', 'Zoho CRM Integration', 'ADR-002 Realtime Pipeline'],
     endpoints: {
       websocket: 'wss://<host>',
       health: '/health',
-      call: {
-        make: 'POST /api/call/make',
-        end: 'POST /api/call/end/:callSid',
-        active: 'GET /api/call/active',
-        details: 'GET /api/call/:callSid'
-      },
-      webhooks: {
-        voice: 'POST /twilio/voice',
-        gather: 'POST /twilio/gather',
-        status: 'POST /twilio/status',
-        recording: 'POST /twilio/recording'
-      },
-      zoho: {
-        test: 'GET /api/zoho/test',
-        fetchLead: 'GET /api/zoho/lead/:leadId',
-        updateScore: 'POST /api/zoho/update-score'
-      }
+      call: { make: 'POST /api/call/make', end: 'POST /api/call/end/:callSid', active: 'GET /api/call/active' },
+      webhooks: { voice: 'POST /twilio/voice', gather: 'POST /twilio/gather', status: 'POST /twilio/status' },
+      zoho: { test: 'GET /api/zoho/test', fetchLead: 'GET /api/zoho/lead/:leadId', updateScore: 'POST /api/zoho/update-score' },
+      realtime: { stream: 'WS /twilio/media', test: 'POST /twilio/media-test', status: 'GET /twilio/media-status' }
     }
   });
 });
 
 const PORT = process.env.PORT || 8080;
 
-// ── ADR-002 Week 2 — Realtime Media Streams (must be before server.listen) ──
+// ADR-002 Week 2 — attach BEFORE server.listen
 const { attachMediaStreamRoutes } = require('./src/realtime/media-stream-routes');
 
-const REALTIME_SYSTEM_PROMPT = process.env.REALTIME_SYSTEM_PROMPT ||
-  'You are Sales360 AI — the world\'s most intelligent sales agent. You are on a live phone call. Keep responses to 2-3 SHORT sentences maximum. Be warm, direct, and conversational. Never mention you are an AI unless asked. Your goal is to qualify the prospect and book a meeting.';
+var REALTIME_SYSTEM_PROMPT = process.env.REALTIME_SYSTEM_PROMPT ||
+  'You are Sales360 AI, the world\'s most intelligent sales agent. You are on a live phone call. Keep responses to 2-3 SHORT sentences. Be warm, direct, conversational. Never mention you are an AI unless asked. Qualify the prospect and book a meeting.';
 
-const REALTIME_OPENING = process.env.REALTIME_OPENING ||
+var REALTIME_OPENING = process.env.REALTIME_OPENING ||
   'Good afternoon, this is Sales360 AI calling. Do you have a couple of minutes?';
 
 attachMediaStreamRoutes(server, app, {
@@ -319,7 +219,7 @@ attachMediaStreamRoutes(server, app, {
   openingLine:  REALTIME_OPENING,
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, function() {
   console.log('\n========================================');
   console.log('  SALES360 SMARTCORE - REAL-TIME ENGINE');
   console.log('========================================\n');
@@ -327,9 +227,8 @@ server.listen(PORT, () => {
   console.log('[SmartCore] Port:', PORT);
   console.log('[SmartCore] WebSocket endpoint ready');
   console.log('[SmartCore] Twilio integration ready');
-  console.log('[SmartCore] Zoho CRM:', zohoService.isEnabled() ? '✅ Connected' : '⚠️  Disabled');
+  console.log('[SmartCore] Zoho CRM:', zohoService.isEnabled() ? 'Connected' : 'Disabled');
   console.log('[SmartCore] Health check: /health\n');
-  
   if (process.env.TWILIO_PHONE_NUMBER) {
     console.log('[Twilio Service] Initialized with number:', process.env.TWILIO_PHONE_NUMBER);
     console.log('Twilio: Active\n');
