@@ -1,11 +1,11 @@
 /**
  * Sales360 Realtime Streaming — RealtimePipeline
- * ADR-002 Week 2 — FINAL
+ * ADR-002 Week 2 — FINAL v2
  *
- * Key fixes:
- * 1. Deepgram paused while agent is responding — prevents false barge-in
- * 2. Keepalive silence frames only sent to Twilio, NOT to Deepgram
- * 3. Barge-in only fires on real caller speech, not silence artifacts
+ * Fixes:
+ * 1. Deepgram paused while agent responding
+ * 2. Barge-in requires sustained speech (3 consecutive high-energy chunks)
+ * 3. Threshold raised to 0.6 — ignores background noise
  */
 
 'use strict';
@@ -18,7 +18,6 @@ const GenerationContext    = require('./GenerationContext');
 const RealtimeMetrics      = require('./RealtimeMetrics');
 const config               = require('./config');
 
-// 20ms of μ-law silence — keeps Twilio stream alive
 var SILENCE_FRAME = Buffer.alloc(160, 0xFF);
 
 class RealtimePipeline extends EventEmitter {
@@ -30,19 +29,20 @@ class RealtimePipeline extends EventEmitter {
     this.openingLine    = opts.openingLine || '';
     this._audio         = opts.audioPipeline || null;
 
-    this._stt             = null;
-    this._currentCtx      = null;
-    this._metrics         = new RealtimeMetrics(this.callSid);
-    this._history         = [];
-    this._turnCount       = 0;
-    this._openingDone     = false;
-    this._agentResponding = false;  // true = agent speaking, pause STT
-    this._ready           = false;
-    this._apiKey          = process.env.ANTHROPIC_API_KEY || '';
-    this._keepAliveTimer  = null;
+    this._stt               = null;
+    this._currentCtx        = null;
+    this._metrics           = new RealtimeMetrics(this.callSid);
+    this._history           = [];
+    this._turnCount         = 0;
+    this._openingDone       = false;
+    this._agentResponding   = false;
+    this._ready             = false;
+    this._apiKey            = process.env.ANTHROPIC_API_KEY || '';
+    this._keepAliveTimer    = null;
+    this._speechChunkCount  = 0;  // consecutive high-energy chunks
+    this._BARGE_IN_CHUNKS   = 3;  // require 3 consecutive chunks before barge-in
+    this._BARGE_IN_RATIO    = 0.6; // 60% non-silence bytes = real speech
   }
-
-  // ─── Lifecycle ───────────────────────────────────────────
 
   async start() {
     console.log('[Pipeline] Starting CallSid=' + this.callSid);
@@ -70,7 +70,6 @@ class RealtimePipeline extends EventEmitter {
   _startKeepalive() {
     var self = this;
     this._keepAliveTimer = setInterval(function() {
-      // Send silence to Twilio ONLY — never to Deepgram
       if (self._audio && !self._agentResponding) {
         self._audio.sendOutbound(SILENCE_FRAME);
       }
@@ -88,24 +87,33 @@ class RealtimePipeline extends EventEmitter {
   receiveAudio(audioChunk) {
     if (!this._ready || !this._stt) return;
 
-    // While agent is responding — barge-in detection only, don't send to STT
     if (this._agentResponding) {
-      // Simple energy check — if caller is speaking loudly, that's a barge-in
-      // μ-law silence = 0xFF, speech has varied byte values
+      // Energy-based barge-in — requires sustained speech
       var nonSilenceBytes = 0;
       for (var i = 0; i < audioChunk.length; i++) {
-        if (audioChunk[i] !== 0xFF && audioChunk[i] !== 0x7F) nonSilenceBytes++;
+        var b = audioChunk[i];
+        if (b !== 0xFF && b !== 0x7F && b !== 0xFE && b !== 0x7E) nonSilenceBytes++;
       }
-      var speechRatio = nonSilenceBytes / audioChunk.length;
+      var ratio = nonSilenceBytes / audioChunk.length;
 
-      if (speechRatio > 0.3 && this._openingDone && this._currentCtx && !this._currentCtx.aborted) {
-        console.log('[Pipeline] Speech detected during response (ratio=' + speechRatio.toFixed(2) + ') — barge-in');
-        this._handleBargeIn();
+      if (ratio > this._BARGE_IN_RATIO) {
+        this._speechChunkCount++;
+        if (this._speechChunkCount >= this._BARGE_IN_CHUNKS) {
+          console.log('[Pipeline] Sustained speech detected (ratio=' + ratio.toFixed(2) + ' chunks=' + this._speechChunkCount + ') — barge-in');
+          this._speechChunkCount = 0;
+          if (this._openingDone && this._currentCtx && !this._currentCtx.aborted) {
+            this._handleBargeIn();
+          }
+        }
+      } else {
+        // Reset counter on silence
+        this._speechChunkCount = 0;
       }
-      return; // Don't forward to Deepgram while agent is speaking
+      return; // Never forward to Deepgram while agent is speaking
     }
 
-    // Agent not speaking — forward to Deepgram normally
+    // Agent not speaking — forward to Deepgram
+    this._speechChunkCount = 0;
     this._stt.sendAudio(audioChunk);
   }
 
@@ -120,8 +128,6 @@ class RealtimePipeline extends EventEmitter {
     var summary = this._metrics.summary();
     if (summary) console.log('[Pipeline] Metrics:', JSON.stringify(summary));
   }
-
-  // ─── STT handlers ────────────────────────────────────────
 
   _onInterim(data) {
     if (!this._metrics.currentTurn) {
@@ -150,8 +156,6 @@ class RealtimePipeline extends EventEmitter {
     if (this._stt) this._stt.sendAudio(Buffer.alloc(0));
   }
 
-  // ─── LLM → TTS pipeline ──────────────────────────────────
-
   async _respond(userText) {
     if (this._currentCtx) this._currentCtx.abort('new-turn');
 
@@ -160,6 +164,7 @@ class RealtimePipeline extends EventEmitter {
     var self   = this;
     this._currentCtx      = new GenerationContext(turnId);
     this._agentResponding = false;
+    this._speechChunkCount = 0;
 
     this.emit('turn:start', { turnId: turnId, callSid: this.callSid });
 
@@ -183,14 +188,15 @@ class RealtimePipeline extends EventEmitter {
       if (data.index === 0) {
         self._metrics.mark('t7');
         self._metrics.mark('t8');
-        self._agentResponding = true;  // Pause STT, enable energy-based barge-in
+        self._agentResponding = true;
         console.log('[Pipeline] Agent speaking — STT paused turn=' + turnId);
       }
       if (self._audio) self._audio.sendOutbound(data.chunk);
     });
 
     tts.on('done', function() {
-      self._agentResponding = false;  // Resume STT
+      self._agentResponding = false;
+      self._speechChunkCount = 0;
       self._metrics.mark('t9');
       var m = self._metrics.endTurn();
       self._currentCtx.complete();
@@ -280,8 +286,6 @@ class RealtimePipeline extends EventEmitter {
     }
   }
 
-  // ─── Opening line ─────────────────────────────────────────
-
   async _speakOpening(text) {
     var self = this;
     var ctx  = new GenerationContext(this.callSid + '-opening');
@@ -314,17 +318,14 @@ class RealtimePipeline extends EventEmitter {
     }
   }
 
-  // ─── Barge-in ─────────────────────────────────────────────
-
   _handleBargeIn() {
     console.log('[Pipeline] Barge-in CallSid=' + this.callSid);
     this._agentResponding = false;
+    this._speechChunkCount = 0;
     if (this._audio) this._audio.clearOutbound();
     this._currentCtx.abort('barge-in');
     this.emit('barge-in', { callSid: this.callSid });
   }
-
-  // ─── Accessors ────────────────────────────────────────────
 
   get metrics()   { return this._metrics; }
   get history()   { return this._history; }
