@@ -1,10 +1,11 @@
 /**
  * Sales360 Realtime Streaming — RealtimePipeline
- * ADR-002 Week 2 — FINAL v3
+ * ADR-002 Week 2 — v4 DEFINITIVE FIX
  *
- * Key fix: Always forward audio to Deepgram — never stop the STT stream.
- * Barge-in is controlled by ignoring transcripts during agent response,
- * not by stopping audio to Deepgram.
+ * Root cause of Turn 2+ failure:
+ * _onUtteranceEnd() was sending Buffer.alloc(0) to Deepgram.
+ * An empty buffer signals CloseStream to Deepgram — killing STT after Turn 1.
+ * Fix: Remove the empty buffer send. Deepgram manages its own utterance boundaries.
  */
 
 'use strict';
@@ -82,9 +83,7 @@ class RealtimePipeline extends EventEmitter {
 
   receiveAudio(audioChunk) {
     if (!this._ready || !this._stt) return;
-
     // ALWAYS forward audio to Deepgram — never stop the STT stream
-    // This keeps Deepgram's VAD active and ready to transcribe
     this._stt.sendAudio(audioChunk);
   }
 
@@ -101,9 +100,7 @@ class RealtimePipeline extends EventEmitter {
   }
 
   _onInterim(data) {
-    // Ignore interim transcripts while agent is responding
     if (this._agentResponding) return;
-
     if (!this._metrics.currentTurn) {
       this._metrics.startTurn();
       this._metrics.mark('t1');
@@ -114,15 +111,13 @@ class RealtimePipeline extends EventEmitter {
   _onFinal(data) {
     if (!data.text.trim()) return;
 
-    // Ignore transcripts during opening line
     if (!this._openingDone) {
       console.log('[Pipeline] Ignoring transcript during opening: "' + data.text + '"');
       return;
     }
 
-    // Ignore transcripts while agent is responding — barge-in handled separately
     if (this._agentResponding) {
-      console.log('[Pipeline] Ignoring transcript during response (barge-in not triggered): "' + data.text + '"');
+      console.log('[Pipeline] Ignoring transcript during agent response: "' + data.text + '"');
       return;
     }
 
@@ -134,7 +129,10 @@ class RealtimePipeline extends EventEmitter {
   }
 
   _onUtteranceEnd() {
-    if (this._stt) this._stt.sendAudio(Buffer.alloc(0));
+    // DO NOTHING — do not send empty buffer to Deepgram.
+    // Empty buffer signals CloseStream and kills STT after Turn 1.
+    // Deepgram manages utterance boundaries internally via endpointing config.
+    console.log('[Pipeline] UtteranceEnd received — Deepgram continues listening');
   }
 
   async _respond(userText) {
