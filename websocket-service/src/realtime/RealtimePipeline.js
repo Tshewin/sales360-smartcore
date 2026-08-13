@@ -1,22 +1,22 @@
 /**
  * Sales360 Realtime Streaming — RealtimePipeline
- * ADR-002 Week 2 — v4 DEFINITIVE FIX
+ * ADR-002 Week 2 — v5
  *
- * Root cause of Turn 2+ failure:
- * _onUtteranceEnd() was sending Buffer.alloc(0) to Deepgram.
- * An empty buffer signals CloseStream to Deepgram — killing STT after Turn 1.
- * Fix: Remove the empty buffer send. Deepgram manages its own utterance boundaries.
+ * Changes from v4:
+ * 1. Switch model to eleven_flash_v2_5 (recommended for voice agents 2026)
+ * 2. Bypass chunker for Turn 2+ — send full Claude response to ElevenLabs at once
+ *    This prevents mid-sentence cutoff from chunker timing issues
+ * 3. Keep utteranceEnd fix from v4
  */
 
 'use strict';
 
 const { EventEmitter } = require('events');
-const DeepgramSTT          = require('./DeepgramSTT');
-const ElevenLabsWS         = require('./ElevenLabsWS');
-const SpeakableTextChunker = require('./SpeakableTextChunker');
-const GenerationContext    = require('./GenerationContext');
-const RealtimeMetrics      = require('./RealtimeMetrics');
-const config               = require('./config');
+const DeepgramSTT      = require('./DeepgramSTT');
+const ElevenLabsWS     = require('./ElevenLabsWS');
+const GenerationContext = require('./GenerationContext');
+const RealtimeMetrics  = require('./RealtimeMetrics');
+const config           = require('./config');
 
 var SILENCE_FRAME = Buffer.alloc(160, 0xFF);
 
@@ -48,8 +48,13 @@ class RealtimePipeline extends EventEmitter {
     this._stt = new DeepgramSTT();
     this._stt.on('interim',      function(r) { self._onInterim(r); });
     this._stt.on('final',        function(r) { self._onFinal(r); });
-    this._stt.on('utteranceEnd', function()  { self._onUtteranceEnd(); });
-    this._stt.on('error',        function(e) { self.emit('error', Object.assign({}, e, { context: 'stt' })); });
+    this._stt.on('utteranceEnd', function()  {
+      // DO NOTHING — empty buffer would close Deepgram
+      console.log('[Pipeline] UtteranceEnd — Deepgram continues');
+    });
+    this._stt.on('error', function(e) {
+      self.emit('error', Object.assign({}, e, { context: 'stt' }));
+    });
 
     await this._stt.connect();
     this._ready = true;
@@ -58,7 +63,7 @@ class RealtimePipeline extends EventEmitter {
     this._startKeepalive();
 
     if (this.openingLine) {
-      this._speakOpening(this.openingLine);
+      this._speakText(this.openingLine, true);
     } else {
       this._openingDone = true;
     }
@@ -83,7 +88,7 @@ class RealtimePipeline extends EventEmitter {
 
   receiveAudio(audioChunk) {
     if (!this._ready || !this._stt) return;
-    // ALWAYS forward audio to Deepgram — never stop the STT stream
+    // ALWAYS forward to Deepgram — never stop STT stream
     this._stt.sendAudio(audioChunk);
   }
 
@@ -110,29 +115,19 @@ class RealtimePipeline extends EventEmitter {
 
   _onFinal(data) {
     if (!data.text.trim()) return;
-
     if (!this._openingDone) {
       console.log('[Pipeline] Ignoring transcript during opening: "' + data.text + '"');
       return;
     }
-
     if (this._agentResponding) {
-      console.log('[Pipeline] Ignoring transcript during agent response: "' + data.text + '"');
+      console.log('[Pipeline] Ignoring transcript during response: "' + data.text + '"');
       return;
     }
-
     this._metrics.mark('t2');
     this._metrics.annotate({ transcript: data.text });
     this.emit('turn:transcript', { callSid: this.callSid, text: data.text, isFinal: true });
     console.log('[Pipeline] Responding to: "' + data.text + '"');
     this._respond(data.text);
-  }
-
-  _onUtteranceEnd() {
-    // DO NOTHING — do not send empty buffer to Deepgram.
-    // Empty buffer signals CloseStream and kills STT after Turn 1.
-    // Deepgram manages utterance boundaries internally via endpointing config.
-    console.log('[Pipeline] UtteranceEnd received — Deepgram continues listening');
   }
 
   async _respond(userText) {
@@ -149,52 +144,10 @@ class RealtimePipeline extends EventEmitter {
     this._history.push({ role: 'user', content: userText });
     if (this._history.length > 20) this._history = this._history.slice(-20);
 
-    var tts     = new ElevenLabsWS(this._currentCtx);
-    var chunker = new SpeakableTextChunker(this._currentCtx);
+    // Step 1: Get full response from Claude
     var fullResponse = '';
-
-    chunker.on('chunk', function(data) {
-      if (self._currentCtx.aborted) return;
-      if (data.index === 0) self._metrics.mark('t5');
-      tts.send(data.text);
-    });
-
-    chunker.on('done', function() { tts.flush(); });
-
-    tts.on('audio', function(data) {
-      if (self._currentCtx.aborted) return;
-      if (data.index === 0) {
-        self._metrics.mark('t7');
-        self._metrics.mark('t8');
-        self._agentResponding = true;
-        console.log('[Pipeline] Agent speaking turn=' + turnId);
-      }
-      if (self._audio) self._audio.sendOutbound(data.chunk);
-    });
-
-    tts.on('done', function() {
-      self._agentResponding = false;
-      self._metrics.mark('t9');
-      var m = self._metrics.endTurn();
-      self._currentCtx.complete();
-      console.log('[Pipeline] Turn complete — listening turn=' + turnId);
-      self.emit('turn:end', { turnId: turnId, callSid: self.callSid, metrics: m });
-    });
-
-    tts.on('error', function(e) {
-      self._agentResponding = false;
-      console.error('[Pipeline] TTS error:', e.error && e.error.message);
-    });
-
     try {
-      await tts.connect();
       this._metrics.mark('t3');
-    } catch (err) {
-      console.error('[Pipeline] TTS connect failed:', err.message);
-      return;
-    }
-
-    try {
       var response = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         signal: this._currentCtx.signal,
@@ -241,57 +194,72 @@ class RealtimePipeline extends EventEmitter {
             if (evt.type === 'content_block_delta' && evt.delta && evt.delta.type === 'text_delta') {
               if (firstToken) { firstToken = false; this._metrics.mark('t4'); }
               fullResponse += evt.delta.text;
-              chunker.write(evt.delta.text);
             }
           } catch(e) {}
         }
       }
-
-      if (!this._currentCtx.aborted) {
-        chunker.end();
-        this._history.push({ role: 'assistant', content: fullResponse });
-        this.emit('turn:response', { turnId: turnId, callSid: this.callSid, text: fullResponse });
-      }
-
     } catch (err) {
       if (err.name === 'AbortError' || (this._currentCtx && this._currentCtx.aborted)) {
         console.log('[Pipeline] Claude aborted turn=' + turnId);
       } else {
         console.error('[Pipeline] Claude error:', err.message);
-        this.emit('error', { error: err, context: 'llm', turnId: turnId });
       }
+      return;
     }
+
+    if (!fullResponse.trim() || this._currentCtx.aborted) return;
+
+    console.log('[Pipeline] Claude response: "' + fullResponse + '"');
+    this._history.push({ role: 'assistant', content: fullResponse });
+    this.emit('turn:response', { turnId: turnId, callSid: this.callSid, text: fullResponse });
+
+    // Step 2: Send full response to ElevenLabs at once
+    this._speakText(fullResponse, false);
   }
 
-  async _speakOpening(text) {
+  async _speakText(text, isOpening) {
     var self = this;
-    var ctx  = new GenerationContext(this.callSid + '-opening');
+    var ctx  = new GenerationContext(this.callSid + (isOpening ? '-opening' : '-turn-' + this._turnCount));
     var tts  = new ElevenLabsWS(ctx);
 
     tts.on('audio', function(data) {
+      if (data.index === 0) {
+        self._agentResponding = true;
+        console.log('[Pipeline] Audio flowing — ' + (isOpening ? 'opening' : 'turn ' + self._turnCount));
+      }
       if (self._audio) self._audio.sendOutbound(data.chunk);
     });
 
     tts.on('done', function() {
+      self._agentResponding = false;
       ctx.complete();
-      self._openingDone = true;
-      self._history.push({ role: 'assistant', content: text });
-      console.log('[Pipeline] Opening line delivered — listening for prospect');
+      if (isOpening) {
+        self._openingDone = true;
+        self._history.push({ role: 'assistant', content: text });
+        console.log('[Pipeline] Opening delivered — listening for prospect');
+      } else {
+        var m = self._metrics.endTurn();
+        console.log('[Pipeline] Turn complete — listening turn=' + self._turnCount);
+        self.emit('turn:end', { callSid: self.callSid, metrics: m });
+      }
     });
 
     tts.on('error', function(e) {
-      self._openingDone = true;
-      console.error('[Pipeline] Opening TTS error:', e.error && e.error.message);
+      self._agentResponding = false;
+      if (isOpening) self._openingDone = true;
+      console.error('[Pipeline] TTS error:', e.error && e.error.message);
     });
 
     try {
       await tts.connect();
+      // Send full text at once — no chunking, no mid-sentence cutoff
       tts.send(text);
       tts.flush();
-      console.log('[Pipeline] Opening sent to TTS CallSid=' + this.callSid);
+      console.log('[Pipeline] Sent to TTS: "' + text + '"');
     } catch (err) {
-      this._openingDone = true;
-      console.error('[Pipeline] Opening connect failed:', err.message);
+      self._agentResponding = false;
+      if (isOpening) self._openingDone = true;
+      console.error('[Pipeline] TTS connect failed:', err.message);
     }
   }
 
