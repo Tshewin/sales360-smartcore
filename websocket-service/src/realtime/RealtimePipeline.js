@@ -1,12 +1,12 @@
 /**
  * Sales360 Realtime Streaming — RealtimePipeline
- * ADR-002 Week 2 — v5
+ * ADR-002 Week 2 — v6
  *
- * Changes from v4:
- * 1. Switch model to eleven_flash_v2_5 (recommended for voice agents 2026)
- * 2. Bypass chunker for Turn 2+ — send full Claude response to ElevenLabs at once
- *    This prevents mid-sentence cutoff from chunker timing issues
- * 3. Keep utteranceEnd fix from v4
+ * Fixes from v5:
+ * 1. Debounce transcript processing — wait 800ms before sending to Claude
+ *    Prevents split sentences from triggering multiple responses
+ * 2. Concatenate multiple finals into one complete utterance
+ * 3. Fix history corruption on aborted turns
  */
 
 'use strict';
@@ -39,6 +39,11 @@ class RealtimePipeline extends EventEmitter {
     this._ready           = false;
     this._apiKey          = process.env.ANTHROPIC_API_KEY || '';
     this._keepAliveTimer  = null;
+
+    // Debounce state
+    this._transcriptBuffer = '';
+    this._debounceTimer    = null;
+    this._DEBOUNCE_MS      = 800;  // wait 800ms for sentence to complete
   }
 
   async start() {
@@ -49,8 +54,8 @@ class RealtimePipeline extends EventEmitter {
     this._stt.on('interim',      function(r) { self._onInterim(r); });
     this._stt.on('final',        function(r) { self._onFinal(r); });
     this._stt.on('utteranceEnd', function()  {
-      // DO NOTHING — empty buffer would close Deepgram
-      console.log('[Pipeline] UtteranceEnd — Deepgram continues');
+      // Flush debounce buffer immediately on utterance end
+      self._flushTranscript();
     });
     this._stt.on('error', function(e) {
       self.emit('error', Object.assign({}, e, { context: 'stt' }));
@@ -88,13 +93,16 @@ class RealtimePipeline extends EventEmitter {
 
   receiveAudio(audioChunk) {
     if (!this._ready || !this._stt) return;
-    // ALWAYS forward to Deepgram — never stop STT stream
     this._stt.sendAudio(audioChunk);
   }
 
   async stop() {
     this._ready = false;
     this._stopKeepalive();
+    if (this._debounceTimer) {
+      clearTimeout(this._debounceTimer);
+      this._debounceTimer = null;
+    }
     if (this._currentCtx) this._currentCtx.abort('call-end');
     if (this._stt) {
       await this._stt.endAudio();
@@ -123,11 +131,34 @@ class RealtimePipeline extends EventEmitter {
       console.log('[Pipeline] Ignoring transcript during response: "' + data.text + '"');
       return;
     }
+
+    // Add to buffer — debounce before sending to Claude
+    this._transcriptBuffer = (this._transcriptBuffer + ' ' + data.text).trim();
+    console.log('[Pipeline] Transcript buffered: "' + this._transcriptBuffer + '"');
+
+    // Reset debounce timer
+    if (this._debounceTimer) clearTimeout(this._debounceTimer);
+    var self = this;
+    this._debounceTimer = setTimeout(function() {
+      self._flushTranscript();
+    }, this._DEBOUNCE_MS);
+  }
+
+  _flushTranscript() {
+    if (this._debounceTimer) {
+      clearTimeout(this._debounceTimer);
+      this._debounceTimer = null;
+    }
+    var text = this._transcriptBuffer.trim();
+    this._transcriptBuffer = '';
+
+    if (!text || this._agentResponding) return;
+
     this._metrics.mark('t2');
-    this._metrics.annotate({ transcript: data.text });
-    this.emit('turn:transcript', { callSid: this.callSid, text: data.text, isFinal: true });
-    console.log('[Pipeline] Responding to: "' + data.text + '"');
-    this._respond(data.text);
+    this._metrics.annotate({ transcript: text });
+    this.emit('turn:transcript', { callSid: this.callSid, text: text, isFinal: true });
+    console.log('[Pipeline] Sending to Claude: "' + text + '"');
+    this._respond(text);
   }
 
   async _respond(userText) {
@@ -141,10 +172,13 @@ class RealtimePipeline extends EventEmitter {
 
     this.emit('turn:start', { turnId: turnId, callSid: this.callSid });
 
-    this._history.push({ role: 'user', content: userText });
+    // Only add to history if not already there (prevent duplicates on abort)
+    var lastEntry = this._history[this._history.length - 1];
+    if (!lastEntry || lastEntry.role !== 'user' || lastEntry.content !== userText) {
+      this._history.push({ role: 'user', content: userText });
+    }
     if (this._history.length > 20) this._history = this._history.slice(-20);
 
-    // Step 1: Get full response from Claude
     var fullResponse = '';
     try {
       this._metrics.mark('t3');
@@ -202,7 +236,7 @@ class RealtimePipeline extends EventEmitter {
       if (err.name === 'AbortError' || (this._currentCtx && this._currentCtx.aborted)) {
         console.log('[Pipeline] Claude aborted turn=' + turnId);
       } else {
-        console.error('[Pipeline] Claude error:', err.message);
+        console.error('[Pipeline] Claude error turn=' + turnId + ':', err.message);
       }
       return;
     }
@@ -210,22 +244,26 @@ class RealtimePipeline extends EventEmitter {
     if (!fullResponse.trim() || this._currentCtx.aborted) return;
 
     console.log('[Pipeline] Claude response: "' + fullResponse + '"');
-    this._history.push({ role: 'assistant', content: fullResponse });
-    this.emit('turn:response', { turnId: turnId, callSid: this.callSid, text: fullResponse });
 
-    // Step 2: Send full response to ElevenLabs at once
+    // Only add assistant response if turn wasn't aborted
+    if (!this._currentCtx.aborted) {
+      this._history.push({ role: 'assistant', content: fullResponse });
+    }
+
+    this.emit('turn:response', { turnId: turnId, callSid: this.callSid, text: fullResponse });
     this._speakText(fullResponse, false);
   }
 
   async _speakText(text, isOpening) {
-    var self = this;
-    var ctx  = new GenerationContext(this.callSid + (isOpening ? '-opening' : '-turn-' + this._turnCount));
-    var tts  = new ElevenLabsWS(ctx);
+    var self    = this;
+    var turnNum = this._turnCount;
+    var ctx     = new GenerationContext(this.callSid + (isOpening ? '-opening' : '-turn-' + turnNum));
+    var tts     = new ElevenLabsWS(ctx);
 
     tts.on('audio', function(data) {
       if (data.index === 0) {
         self._agentResponding = true;
-        console.log('[Pipeline] Audio flowing — ' + (isOpening ? 'opening' : 'turn ' + self._turnCount));
+        console.log('[Pipeline] Audio flowing — ' + (isOpening ? 'opening' : 'turn ' + turnNum));
       }
       if (self._audio) self._audio.sendOutbound(data.chunk);
     });
@@ -236,10 +274,10 @@ class RealtimePipeline extends EventEmitter {
       if (isOpening) {
         self._openingDone = true;
         self._history.push({ role: 'assistant', content: text });
-        console.log('[Pipeline] Opening delivered — listening for prospect');
+        console.log('[Pipeline] Opening delivered — listening');
       } else {
         var m = self._metrics.endTurn();
-        console.log('[Pipeline] Turn complete — listening turn=' + self._turnCount);
+        console.log('[Pipeline] Turn complete — listening turn=' + turnNum);
         self.emit('turn:end', { callSid: self.callSid, metrics: m });
       }
     });
@@ -252,7 +290,6 @@ class RealtimePipeline extends EventEmitter {
 
     try {
       await tts.connect();
-      // Send full text at once — no chunking, no mid-sentence cutoff
       tts.send(text);
       tts.flush();
       console.log('[Pipeline] Sent to TTS: "' + text + '"');
