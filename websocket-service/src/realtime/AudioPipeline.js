@@ -39,7 +39,7 @@ class AudioPipeline {
     this._outboundActive = true;
 
     // Log first chunk and every 10th after
-    if (this._chunksSent === 1 || this._chunksSent % 100 === 0) {
+    if (false) {
       console.log('[AudioPipeline] Sent chunk #' + this._chunksSent + ' streamSid=' + this._streamSid + ' bytes=' + audioChunk.length);
     }
   }
