@@ -47,7 +47,7 @@ const config = {
     elevenlabs: {
       apiKey: process.env.ELEVENLABS_API_KEY || '',
       voiceId: process.env.ELEVENLABS_VOICE_ID || 'lJd1hi6nFFWkrcDH9i3a',
-      modelId: 'eleven_flash_v2_5',
+      modelId: 'eleven_turbo_v2_5',
       outputFormat: 'ulaw_8000',
       wsUrl: 'wss://api.elevenlabs.io/v1/text-to-speech',
       optimizeStreamingLatency: 4,
