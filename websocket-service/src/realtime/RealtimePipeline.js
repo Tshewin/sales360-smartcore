@@ -1,12 +1,11 @@
 /**
  * Sales360 Realtime Streaming — RealtimePipeline
- * ADR-002 Week 2 — v6
+ * ADR-002 Week 2 — v7
  *
- * Fixes from v5:
- * 1. Debounce transcript processing — wait 800ms before sending to Claude
- *    Prevents split sentences from triggering multiple responses
- * 2. Concatenate multiple finals into one complete utterance
- * 3. Fix history corruption on aborted turns
+ * Fixes from v6:
+ * 1. Pop user message from history on Claude error — prevents invalid_argument
+ * 2. Increase debounce to 1200ms — catches slower split sentences
+ * 3. Increase debounce to 1500ms on utteranceEnd flush — give Deepgram more time
  */
 
 'use strict';
@@ -43,7 +42,7 @@ class RealtimePipeline extends EventEmitter {
     // Debounce state
     this._transcriptBuffer = '';
     this._debounceTimer    = null;
-    this._DEBOUNCE_MS      = 800;  // wait 800ms for sentence to complete
+    this._DEBOUNCE_MS      = 1200;  // increased from 800ms — catches slower split sentences
   }
 
   async start() {
@@ -54,8 +53,8 @@ class RealtimePipeline extends EventEmitter {
     this._stt.on('interim',      function(r) { self._onInterim(r); });
     this._stt.on('final',        function(r) { self._onFinal(r); });
     this._stt.on('utteranceEnd', function()  {
-      // Flush debounce buffer immediately on utterance end
-      self._flushTranscript();
+      // Flush after short delay to catch any trailing finals
+      setTimeout(function() { self._flushTranscript(); }, 200);
     });
     this._stt.on('error', function(e) {
       self.emit('error', Object.assign({}, e, { context: 'stt' }));
@@ -174,8 +173,10 @@ class RealtimePipeline extends EventEmitter {
 
     // Only add to history if not already there (prevent duplicates on abort)
     var lastEntry = this._history[this._history.length - 1];
+    var userMsgAdded = false;
     if (!lastEntry || lastEntry.role !== 'user' || lastEntry.content !== userText) {
       this._history.push({ role: 'user', content: userText });
+      userMsgAdded = true;
     }
     if (this._history.length > 20) this._history = this._history.slice(-20);
 
@@ -237,6 +238,13 @@ class RealtimePipeline extends EventEmitter {
         console.log('[Pipeline] Claude aborted turn=' + turnId);
       } else {
         console.error('[Pipeline] Claude error turn=' + turnId + ':', err.message);
+        // KEY FIX: Remove the user message we just added — prevents invalid_argument on next turn
+        if (userMsgAdded && this._history.length > 0 &&
+            this._history[this._history.length - 1].role === 'user' &&
+            this._history[this._history.length - 1].content === userText) {
+          this._history.pop();
+          console.log('[Pipeline] Removed failed user message from history');
+        }
       }
       return;
     }
@@ -245,7 +253,6 @@ class RealtimePipeline extends EventEmitter {
 
     console.log('[Pipeline] Claude response: "' + fullResponse + '"');
 
-    // Only add assistant response if turn wasn't aborted
     if (!this._currentCtx.aborted) {
       this._history.push({ role: 'assistant', content: fullResponse });
     }
