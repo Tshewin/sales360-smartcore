@@ -1,14 +1,12 @@
 /**
  * Sales360 Realtime Streaming — RealtimePipeline
- * ADR-002 Week 2 — v8
+ * ADR-002 Week 2 — v6
  *
- * Critical fixes:
- * 1. Clear Twilio buffer immediately when new transcript arrives
- *    Eliminates audio queue backlog — no more 30-60s lag
- * 2. Processing lock — prevents simultaneous _respond() calls
- *    Eliminates invalid_argument errors permanently
- * 3. Strip emojis from Claude responses before TTS
- * 4. History trim to 10 turns — reduces Claude latency
+ * Fixes from v5:
+ * 1. Debounce transcript processing — wait 800ms before sending to Claude
+ *    Prevents split sentences from triggering multiple responses
+ * 2. Concatenate multiple finals into one complete utterance
+ * 3. Fix history corruption on aborted turns
  */
 
 'use strict';
@@ -21,15 +19,6 @@ const RealtimeMetrics  = require('./RealtimeMetrics');
 const config           = require('./config');
 
 var SILENCE_FRAME = Buffer.alloc(160, 0xFF);
-
-// Strip emojis and non-speakable characters from text
-function cleanForTTS(text) {
-  return text
-    .replace(/[\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]/gu, '')
-    .replace(/[^\x00-\x7F]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
 
 class RealtimePipeline extends EventEmitter {
   constructor(opts) {
@@ -47,7 +36,6 @@ class RealtimePipeline extends EventEmitter {
     this._turnCount       = 0;
     this._openingDone     = false;
     this._agentResponding = false;
-    this._isProcessing    = false;  // lock — prevents simultaneous _respond() calls
     this._ready           = false;
     this._apiKey          = process.env.ANTHROPIC_API_KEY || '';
     this._keepAliveTimer  = null;
@@ -55,7 +43,7 @@ class RealtimePipeline extends EventEmitter {
     // Debounce state
     this._transcriptBuffer = '';
     this._debounceTimer    = null;
-    this._DEBOUNCE_MS      = 1200;
+    this._DEBOUNCE_MS      = 800;  // wait 800ms for sentence to complete
   }
 
   async start() {
@@ -66,7 +54,8 @@ class RealtimePipeline extends EventEmitter {
     this._stt.on('interim',      function(r) { self._onInterim(r); });
     this._stt.on('final',        function(r) { self._onFinal(r); });
     this._stt.on('utteranceEnd', function()  {
-      setTimeout(function() { self._flushTranscript(); }, 200);
+      // Flush debounce buffer immediately on utterance end
+      self._flushTranscript();
     });
     this._stt.on('error', function(e) {
       self.emit('error', Object.assign({}, e, { context: 'stt' }));
@@ -143,13 +132,6 @@ class RealtimePipeline extends EventEmitter {
       return;
     }
 
-    // KEY FIX 1: Clear Twilio outbound buffer immediately when prospect speaks
-    // This discards any queued audio backlog before processing new input
-    if (this._audio && this._transcriptBuffer === '') {
-      this._audio.clearOutbound();
-      console.log('[Pipeline] Outbound buffer cleared — prospect speaking');
-    }
-
     // Add to buffer — debounce before sending to Claude
     this._transcriptBuffer = (this._transcriptBuffer + ' ' + data.text).trim();
     console.log('[Pipeline] Transcript buffered: "' + this._transcriptBuffer + '"');
@@ -172,23 +154,21 @@ class RealtimePipeline extends EventEmitter {
 
     if (!text || this._agentResponding) return;
 
-    // KEY FIX 2: Processing lock — reject if already processing
-    if (this._isProcessing) {
-      console.log('[Pipeline] Already processing — skipping: "' + text + '"');
-      return;
-    }
-
     this._metrics.mark('t2');
     this._metrics.annotate({ transcript: text });
     this.emit('turn:transcript', { callSid: this.callSid, text: text, isFinal: true });
+    // Clear Twilio outbound buffer ONLY after confirmed real speech
+    // Placed here after debounce confirms genuine utterance
+    if (this._audio) {
+      this._audio.clearOutbound();
+      console.log('[Pipeline] Outbound buffer cleared — confirmed speech');
+    }
+
     console.log('[Pipeline] Sending to Claude: "' + text + '"');
     this._respond(text);
   }
 
   async _respond(userText) {
-    // Processing lock
-    this._isProcessing = true;
-
     if (this._currentCtx) this._currentCtx.abort('new-turn');
 
     this._turnCount++;
@@ -199,16 +179,12 @@ class RealtimePipeline extends EventEmitter {
 
     this.emit('turn:start', { turnId: turnId, callSid: this.callSid });
 
-    // Only add to history if not already there
+    // Only add to history if not already there (prevent duplicates on abort)
     var lastEntry = this._history[this._history.length - 1];
-    var userMsgAdded = false;
     if (!lastEntry || lastEntry.role !== 'user' || lastEntry.content !== userText) {
       this._history.push({ role: 'user', content: userText });
-      userMsgAdded = true;
     }
-
-    // KEY FIX 3: Keep only last 10 turns — reduces Claude latency
-    if (this._history.length > 10) this._history = this._history.slice(-10);
+    if (this._history.length > 20) this._history = this._history.slice(-20);
 
     var fullResponse = '';
     try {
@@ -268,37 +244,21 @@ class RealtimePipeline extends EventEmitter {
         console.log('[Pipeline] Claude aborted turn=' + turnId);
       } else {
         console.error('[Pipeline] Claude error turn=' + turnId + ':', err.message);
-        // Remove failed user message to prevent invalid_argument
-        if (userMsgAdded && this._history.length > 0 &&
-            this._history[this._history.length - 1].role === 'user' &&
-            this._history[this._history.length - 1].content === userText) {
-          this._history.pop();
-          console.log('[Pipeline] Removed failed user message from history');
-        }
       }
-      this._isProcessing = false;
       return;
     }
 
-    if (!fullResponse.trim() || this._currentCtx.aborted) {
-      this._isProcessing = false;
-      return;
-    }
+    if (!fullResponse.trim() || this._currentCtx.aborted) return;
 
-    // KEY FIX 4: Strip emojis before TTS
-    var cleanResponse = cleanForTTS(fullResponse);
-    console.log('[Pipeline] Claude response: "' + cleanResponse + '"');
+    console.log('[Pipeline] Claude response: "' + fullResponse + '"');
 
+    // Only add assistant response if turn wasn't aborted
     if (!this._currentCtx.aborted) {
-      this._history.push({ role: 'assistant', content: cleanResponse });
+      this._history.push({ role: 'assistant', content: fullResponse });
     }
 
-    this.emit('turn:response', { turnId: turnId, callSid: this.callSid, text: cleanResponse });
-
-    // Release lock before speaking — allows new transcripts while TTS plays
-    this._isProcessing = false;
-
-    this._speakText(cleanResponse, false);
+    this.emit('turn:response', { turnId: turnId, callSid: this.callSid, text: fullResponse });
+    this._speakText(fullResponse, false);
   }
 
   async _speakText(text, isOpening) {
