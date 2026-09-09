@@ -1,11 +1,12 @@
 /**
  * Sales360 Realtime Streaming — DeepgramSTT
- * ADR-002 Week 1
+ * ADR-002 Week 2 — Updated for TurnCompletionController
  *
- * Provisional STT provider using Deepgram Nova-2 over WebSocket.
- * Receives μ-law 8kHz audio from Twilio, streams transcript back.
- *
- * Will be benchmarked against alternatives before production.
+ * Changes:
+ * - vad_events: true — enables SpeechStarted event
+ * - Emits 'speechFinal' when speech_final=true
+ * - Emits 'speechStarted' on VAD SpeechStarted event
+ * - Both used by TurnCompletionController for adaptive turn detection
  */
 
 'use strict';
@@ -23,26 +24,22 @@ class DeepgramSTT extends STTAdapter {
     this._keepAliveInterval = null;
   }
 
-  /**
-   * Open Deepgram streaming WebSocket.
-   */
   async connect() {
     const apiKey = this._cfg.apiKey;
-    if (!apiKey) {
-      throw new Error('DEEPGRAM_API_KEY is required');
-    }
+    if (!apiKey) throw new Error('DEEPGRAM_API_KEY is required');
 
     const params = new URLSearchParams({
-      model: this._cfg.model,
-      language: this._cfg.language,
-      encoding: this._cfg.encoding,
-      sample_rate: String(this._cfg.sampleRate),
-      channels: String(this._cfg.channels),
-      punctuate: String(this._cfg.punctuate),
-      interim_results: String(this._cfg.interimResults),
+      model:            this._cfg.model,
+      language:         this._cfg.language,
+      encoding:         this._cfg.encoding,
+      sample_rate:      String(this._cfg.sampleRate),
+      channels:         String(this._cfg.channels),
+      punctuate:        String(this._cfg.punctuate),
+      interim_results:  String(this._cfg.interimResults),
       utterance_end_ms: String(this._cfg.utteranceEndMs),
-      endpointing: String(this._cfg.endpointing),
-      smart_format: String(this._cfg.smartFormat),
+      endpointing:      String(this._cfg.endpointing),
+      smart_format:     String(this._cfg.smartFormat),
+      vad_events:       'true',   // enables SpeechStarted event
     });
 
     const url = `wss://api.deepgram.com/v1/listen?${params.toString()}`;
@@ -54,7 +51,6 @@ class DeepgramSTT extends STTAdapter {
 
       this._ws.on('open', () => {
         this.connected = true;
-        // Deepgram requires periodic keepalive for long connections
         this._keepAliveInterval = setInterval(() => {
           if (this._ws?.readyState === WebSocket.OPEN) {
             this._ws.send(JSON.stringify({ type: 'KeepAlive' }));
@@ -86,28 +82,18 @@ class DeepgramSTT extends STTAdapter {
     });
   }
 
-  /**
-   * Send μ-law audio to Deepgram.
-   * @param {Buffer} audioChunk
-   */
   sendAudio(audioChunk) {
     if (this._ws?.readyState === WebSocket.OPEN) {
       this._ws.send(audioChunk);
     }
   }
 
-  /**
-   * Signal end of audio (triggers Deepgram to finalize any pending transcript).
-   */
   async endAudio() {
     if (this._ws?.readyState === WebSocket.OPEN) {
       this._ws.send(JSON.stringify({ type: 'CloseStream' }));
     }
   }
 
-  /**
-   * Close WebSocket and clean up.
-   */
   async close() {
     clearInterval(this._keepAliveInterval);
     if (this._ws) {
@@ -119,38 +105,45 @@ class DeepgramSTT extends STTAdapter {
     this.connected = false;
   }
 
-  /**
-   * Handle Deepgram response messages.
-   */
   _handleMessage(msg) {
-    // Speech results
+    // Speech transcript results
     if (msg.type === 'Results' && msg.channel?.alternatives?.length > 0) {
       const alt = msg.channel.alternatives[0];
       const text = alt.transcript || '';
-
       if (text.length === 0) return;
 
       const result = {
         text,
-        confidence: alt.confidence || 0,
-        isFinal: msg.is_final === true,
+        confidence:  alt.confidence || 0,
+        isFinal:     msg.is_final === true,
         speechFinal: msg.speech_final === true,
-        words: alt.words || [],
+        words:       alt.words || [],
       };
 
       if (result.isFinal) {
         this.emit('final', result);
+        // speech_final = Deepgram's endpointing detected a silence gap
+        // This is the candidate turn-end signal for TurnCompletionController
+        if (result.speechFinal) {
+          this.emit('speechFinal', result);
+        }
       } else {
         this.emit('interim', result);
       }
     }
 
-    // Utterance end (Deepgram's higher-level boundary)
+    // VAD SpeechStarted — prospect resumed speaking
+    // Critical for cancelling pending turn commits
+    if (msg.type === 'SpeechStarted') {
+      this.emit('speechStarted', { timestamp: msg.timestamp });
+    }
+
+    // UtteranceEnd — backstop signal
     if (msg.type === 'UtteranceEnd') {
       this.emit('utteranceEnd', { lastWordEnd: msg.last_word_end });
     }
 
-    // Metadata (connection info)
+    // Metadata
     if (msg.type === 'Metadata') {
       this.emit('metadata', msg);
     }
