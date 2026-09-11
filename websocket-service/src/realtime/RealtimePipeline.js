@@ -1,22 +1,18 @@
 /**
  * Sales360 Realtime Streaming — RealtimePipeline
- * ADR-002 Week 2 — v9 FINAL
+ * ADR-002 Week 2 — v10 FINAL
  *
- * Implements ChatGPT's recommended TurnCompletionController architecture:
+ * Implements ChatGPT Section 8: Context-Aware Grace Periods
  *
- * is_final      → append to utterance buffer ONLY (never triggers Claude)
- * speech_final  → candidate turn-end → adaptive grace period
- * SpeechStarted → cancel pending commit immediately
- * UtteranceEnd  → safety-net backstop only
+ * After each agent response, classify expected response shape:
+ * - binary (yes/no question)      → 150ms base grace
+ * - short_fact (name/number/date) → 250ms base grace
+ * - objection (concern/pushback)  → 450ms base grace
+ * - open_explanation (discovery)  → 700ms base grace
+ * - unknown (default)             → 400ms base grace
  *
- * Adaptive grace periods (ChatGPT recommended):
- * - Short answer (yes/no/okay): 175ms
- * - Clearly complete thought:   250ms
- * - Normal/uncertain:           450ms
- * - Likely incomplete:          800ms
- *
- * Expected latency: 600-950ms for normal turns (vs 800ms+ debounce before)
- * Zero mid-sentence interruptions.
+ * This is the one missing piece from ChatGPT's recommendation.
+ * Everything else was already correctly implemented in v9.
  */
 
 'use strict';
@@ -30,7 +26,6 @@ const config           = require('./config');
 
 var SILENCE_FRAME = Buffer.alloc(160, 0xFF);
 
-// Strip emojis and non-ASCII from Claude responses before TTS
 function cleanForTTS(text) {
   return text
     .replace(/[\u{1F000}-\u{1FFFF}]/gu, '')
@@ -41,22 +36,60 @@ function cleanForTTS(text) {
     .trim();
 }
 
-// ─── TurnCompletionController ────────────────────────────────────────────────
-// Implements ChatGPT's recommended architecture for turn detection.
-// Separates transcript assembly (is_final) from turn completion (speech_final).
+// ─── Classify expected response shape from agent's last question ──────────────
+function classifyExpectedResponse(agentText) {
+  if (!agentText) return 'unknown';
+  var t = agentText.toLowerCase();
 
-class TurnCompletionController {
-  constructor(onTurnComplete) {
-    this.onTurnComplete  = onTurnComplete;
-    this.finalSegments   = [];
-    this.latestInterim   = '';
-    this.commitTimer     = null;
-    this.committed       = false;
+  // Binary: yes/no questions
+  if (/\b(are you|do you|have you|is this|would you|can you|did you|is that|does that)\b.*\?/.test(t)) {
+    return 'binary';
   }
 
-  // Called on every Deepgram transcript event
+  // Short fact: name, email, number, time, date
+  if (/\b(your name|best email|email address|phone number|how many|how much|what time|which day|what date|best time)\b/.test(t)) {
+    return 'short_fact';
+  }
+
+  // Open explanation: discovery questions expecting narrative
+  if (/\b(what is your biggest|what.*challenge|tell me|what.*look like|what.*happen|how.*currently|what.*tried|what.*mean|describe|explain|walk me through)\b/.test(t)) {
+    return 'open_explanation';
+  }
+
+  // Objection handling context
+  if (/\b(i understand|i hear you|fair enough|that makes sense|absolutely|of course)\b/.test(t)) {
+    return 'objection';
+  }
+
+  return 'unknown';
+}
+
+var BASE_GRACE = {
+  binary:           150,
+  short_fact:       250,
+  objection:        450,
+  open_explanation: 700,
+  unknown:          400,
+};
+
+// ─── TurnCompletionController ─────────────────────────────────────────────────
+class TurnCompletionController {
+  constructor(onTurnComplete) {
+    this.onTurnComplete       = onTurnComplete;
+    this.finalSegments        = [];
+    this.latestInterim        = '';
+    this.commitTimer          = null;
+    this.committed            = false;
+    this.expectedResponseShape = 'unknown';
+  }
+
+  setExpectedResponseShape(shape) {
+    this.expectedResponseShape = shape;
+    console.log('[TurnController] Expected response shape: ' + shape);
+  }
+
   onTranscript(event) {
-    const text = event.text && event.text.trim();
+    var text = event.text && event.text.trim();
     if (!text) return;
 
     if (!event.isFinal) {
@@ -64,30 +97,24 @@ class TurnCompletionController {
       return;
     }
 
-    // is_final = segment stability only — append to buffer
     this.finalSegments.push(text);
     this.latestInterim = '';
 
-    // speech_final = candidate turn-end (endpointing detected silence gap)
     if (event.speechFinal) {
       this._scheduleCandidateCommit();
     }
   }
 
-  // Called when VAD detects prospect resumed speaking
-  // Cancels any pending commit — prospect wasn't done
   onSpeechStarted() {
     this._cancelPendingCommit();
   }
 
-  // Called on UtteranceEnd — backstop only
   onUtteranceEnd() {
     if (!this.committed && this._getUtterance()) {
       this._commit();
     }
   }
 
-  // Reset for next turn
   reset() {
     this._cancelPendingCommit();
     this.finalSegments = [];
@@ -101,24 +128,31 @@ class TurnCompletionController {
 
   _scheduleCandidateCommit() {
     this._cancelPendingCommit();
-    const utterance = this._getUtterance();
-    const delay     = this._chooseGracePeriod(utterance);
-    this.commitTimer = setTimeout(() => this._commit(), delay);
+    var utterance = this._getUtterance();
+    var delay     = this._chooseGracePeriod(utterance);
+    console.log('[TurnController] Candidate commit in ' + delay + 'ms for: "' + utterance + '"');
+    var self = this;
+    this.commitTimer = setTimeout(function() { self._commit(); }, delay);
   }
 
   _chooseGracePeriod(text) {
-    if (!text) return 450;
-    if (this._isImmediateAnswer(text)) return 175;
-    if (this._looksIncomplete(text))   return 800;
-    if (this._looksComplete(text))     return 250;
-    return 450;
+    // Start with context-aware base grace
+    var baseGrace = BASE_GRACE[this.expectedResponseShape] || 400;
+
+    // Then apply semantic refinement on top
+    if (!text) return baseGrace;
+    if (this._isImmediateAnswer(text)) return Math.min(baseGrace, 175);
+    if (this._looksIncomplete(text))   return Math.max(baseGrace, 800);
+    if (this._looksComplete(text))     return Math.min(baseGrace, 300);
+    return baseGrace;
   }
 
   _commit() {
-    const utterance = this._getUtterance();
+    var utterance = this._getUtterance();
     if (!utterance || this.committed) return;
     this.committed = true;
     this._cancelPendingCommit();
+    console.log('[TurnController] Committed: "' + utterance + '"');
     this.onTurnComplete(utterance);
   }
 
@@ -130,11 +164,11 @@ class TurnCompletionController {
   }
 
   _isImmediateAnswer(text) {
-    return /^(yes|yeah|yep|yup|no|nope|okay|ok|sure|correct|exactly|absolutely|right|go ahead|alright|fine|great|perfect)[.!?]?$/i.test(text.trim());
+    return /^(yes|yeah|yep|yup|no|nope|okay|ok|sure|correct|exactly|absolutely|right|go ahead|alright|fine|great|perfect|not really|maybe)[.!?]?$/i.test(text.trim());
   }
 
   _looksIncomplete(text) {
-    const t = text.trim().toLowerCase();
+    var t = text.trim().toLowerCase();
     return (
       /\b(and|but|because|so|if|when|although|though|unless|while|which|that|then|like)\s*[,.]?\s*$/.test(t) ||
       /\b(the|a|an|my|your|our|their|to|for|with|from)\s*$/.test(t) ||
@@ -147,8 +181,7 @@ class TurnCompletionController {
   }
 }
 
-// ─── RealtimePipeline ────────────────────────────────────────────────────────
-
+// ─── RealtimePipeline ─────────────────────────────────────────────────────────
 class RealtimePipeline extends EventEmitter {
   constructor(opts) {
     super();
@@ -176,18 +209,19 @@ class RealtimePipeline extends EventEmitter {
     console.log('[Pipeline] Starting CallSid=' + this.callSid);
 
     var self = this;
-
-    // Initialise TurnCompletionController
     this._turnController = new TurnCompletionController(function(utterance) {
       self._onTurnComplete(utterance);
     });
 
+    // Opening is an open question — expect open_explanation
+    this._turnController.setExpectedResponseShape('open_explanation');
+
     this._stt = new DeepgramSTT();
 
-    // is_final + speech_final → TurnCompletionController
     this._stt.on('interim', function(r) {
+      if (!self._openingDone || self._agentResponding) return;
       self._turnController.onTranscript({ text: r.text, isFinal: false, speechFinal: false });
-      if (!self._agentResponding && !self._metrics.currentTurn) {
+      if (!self._metrics.currentTurn) {
         self._metrics.startTurn();
         self._metrics.mark('t1');
       }
@@ -195,24 +229,24 @@ class RealtimePipeline extends EventEmitter {
     });
 
     this._stt.on('final', function(r) {
-      if (!self._openingDone || self._agentResponding) {
-        if (!self._openingDone) console.log('[Pipeline] Ignoring transcript during opening: "' + r.text + '"');
-        if (self._agentResponding) console.log('[Pipeline] Ignoring transcript during response: "' + r.text + '"');
+      if (!self._openingDone) {
+        console.log('[Pipeline] Ignoring transcript during opening: "' + r.text + '"');
+        return;
+      }
+      if (self._agentResponding) {
+        console.log('[Pipeline] Ignoring transcript during response: "' + r.text + '"');
         return;
       }
       console.log('[Pipeline] Transcript segment: "' + r.text + '" speechFinal=' + r.speechFinal);
       self._turnController.onTranscript({ text: r.text, isFinal: true, speechFinal: r.speechFinal });
     });
 
-    // SpeechStarted → cancel pending commit (prospect still speaking)
     this._stt.on('speechStarted', function() {
       if (!self._openingDone || self._agentResponding) return;
       console.log('[Pipeline] SpeechStarted — cancelling pending commit');
       self._turnController.onSpeechStarted();
     });
 
-    // speech_final already handled inside 'final' event above
-    // UtteranceEnd → backstop
     this._stt.on('utteranceEnd', function() {
       if (!self._openingDone || self._agentResponding) return;
       console.log('[Pipeline] UtteranceEnd — backstop check');
@@ -236,19 +270,15 @@ class RealtimePipeline extends EventEmitter {
     }
   }
 
-  // Called by TurnCompletionController when utterance is complete
   _onTurnComplete(utterance) {
     if (this._isProcessing) {
       console.log('[Pipeline] Already processing — skipping: "' + utterance + '"');
       return;
     }
-
-    // Clear Twilio outbound buffer — discard queued audio backlog
     if (this._audio) {
       this._audio.clearOutbound();
       console.log('[Pipeline] Outbound buffer cleared — turn complete');
     }
-
     this._metrics.mark('t2');
     this._metrics.annotate({ transcript: utterance });
     this.emit('turn:transcript', { callSid: this.callSid, text: utterance, isFinal: true });
@@ -373,7 +403,6 @@ class RealtimePipeline extends EventEmitter {
             this._history[this._history.length - 1].role === 'user' &&
             this._history[this._history.length - 1].content === userText) {
           this._history.pop();
-          console.log('[Pipeline] Removed failed user message from history');
         }
       }
       this._isProcessing = false;
@@ -392,12 +421,13 @@ class RealtimePipeline extends EventEmitter {
       this._history.push({ role: 'assistant', content: cleanResponse });
     }
 
-    this.emit('turn:response', { turnId: turnId, callSid: this.callSid, text: cleanResponse });
-    this._isProcessing = false;
-
-    // Reset turn controller for next turn
+    // Classify what kind of response to expect next
+    var expectedShape = classifyExpectedResponse(cleanResponse);
+    this._turnController.setExpectedResponseShape(expectedShape);
     this._turnController.reset();
 
+    this.emit('turn:response', { turnId: turnId, callSid: this.callSid, text: cleanResponse });
+    this._isProcessing = false;
     this._speakText(cleanResponse, false);
   }
 
