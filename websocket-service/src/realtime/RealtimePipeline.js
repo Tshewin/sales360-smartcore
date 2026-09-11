@@ -75,12 +75,13 @@ var BASE_GRACE = {
 // ─── TurnCompletionController ─────────────────────────────────────────────────
 class TurnCompletionController {
   constructor(onTurnComplete) {
-    this.onTurnComplete       = onTurnComplete;
-    this.finalSegments        = [];
-    this.latestInterim        = '';
-    this.commitTimer          = null;
-    this.committed            = false;
+    this.onTurnComplete        = onTurnComplete;
+    this.finalSegments         = [];
+    this.latestInterim         = '';
+    this.commitTimer           = null;
+    this.committed             = false;
     this.expectedResponseShape = 'unknown';
+    this.speechActive          = false;  // Patch A: track VAD speech state
   }
 
   setExpectedResponseShape(shape) {
@@ -101,18 +102,30 @@ class TurnCompletionController {
     this.latestInterim = '';
 
     if (event.speechFinal) {
+      this.speechActive = false;  // Patch A: endpointing detected silence
       this._scheduleCandidateCommit();
     }
   }
 
   onSpeechStarted() {
+    this.speechActive = true;  // Patch A: prospect is speaking
     this._cancelPendingCommit();
   }
 
   onUtteranceEnd() {
-    if (!this.committed && this._getUtterance()) {
-      this._commit();
+    // Patch A: guarded backstop — do not force-commit incomplete speech
+    var u = this._getUtterance();
+    if (!u || this.committed) return;
+    // If VAD thinks speech is still active, do not commit
+    if (this.speechActive) return;
+    // If there is an unprocessed interim, prospect may still be speaking
+    if (this.latestInterim) return;
+    // If utterance looks incomplete, schedule a longer grace instead of committing
+    if (this._looksIncomplete(u)) {
+      this._scheduleCandidateCommit();
+      return;
     }
+    this._commit();
   }
 
   reset() {
@@ -120,6 +133,7 @@ class TurnCompletionController {
     this.finalSegments = [];
     this.latestInterim = '';
     this.committed     = false;
+    this.speechActive  = false;  // Patch A
   }
 
   _getUtterance() {
@@ -168,11 +182,19 @@ class TurnCompletionController {
   }
 
   _looksIncomplete(text) {
+    // Patch A: expanded with real Sales360 transcript fragments
     var t = text.trim().toLowerCase();
     return (
+      // Trailing connectives — classic mid-sentence pause
       /\b(and|but|because|so|if|when|although|though|unless|while|which|that|then|like)\s*[,.]?\s*$/.test(t) ||
+      // Trailing articles/prepositions
       /\b(the|a|an|my|your|our|their|to|for|with|from)\s*$/.test(t) ||
-      /(?:what happened was|the thing is|my problem is|what i mean is|i was thinking|i wanted to|i'm trying to)\s*$/i.test(t)
+      // Known incomplete openers from real Sales360 calls
+      /(?:what happened was|the thing is|my problem is|what i mean is|i was thinking|i wanted to|i'm trying to|i am trying to)\s*$/i.test(t) ||
+      // Real transcript fragments from Sales360 calls that caused false commits
+      /\b(but it's not|but it is not|but i haven't|but i have not|and then i|the reason is|what happened is|i think that|i feel like|it's because|it is because|the problem is|so my|closed turnover because|turnover because|because what|because i|because they|because the|but the|but they|but we|but he|but she)\s*$/i.test(t) ||
+      // Ends with comma — almost always incomplete
+      /,\s*$/.test(t)
     );
   }
 
