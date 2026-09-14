@@ -493,8 +493,9 @@ class RealtimePipeline extends EventEmitter {
                 console.log('[Pipeline] First Claude token turn=' + turnId);
               }
               // Patch C: accumulate for history AND pipe into chunker simultaneously
+              // cleanForTTS applied to fullResponse only — not individual tokens (prevents word cramming)
               fullResponse += token;
-              chunker.write(cleanForTTS(token));
+              chunker.write(token);
             }
           } catch(e) {}
         }
