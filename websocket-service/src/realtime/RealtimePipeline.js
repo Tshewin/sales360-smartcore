@@ -19,7 +19,8 @@
 
 const { EventEmitter } = require('events');
 const DeepgramSTT      = require('./DeepgramSTT');
-const ElevenLabsWS     = require('./ElevenLabsWS');
+const ElevenLabsWS         = require('./ElevenLabsWS');
+const SpeakableTextChunker = require('./SpeakableTextChunker');
 const GenerationContext = require('./GenerationContext');
 const RealtimeMetrics  = require('./RealtimeMetrics');
 const config           = require('./config');
@@ -344,13 +345,16 @@ class RealtimePipeline extends EventEmitter {
   }
 
   async _respond(userText) {
+    // Patch C+D: One GenerationContext owns Claude SSE + Chunker + ElevenLabs
+    // Claude tokens stream directly into chunker -> ElevenLabs in parallel
+    // No waiting for full Claude completion before audio starts
     this._isProcessing = true;
     if (this._currentCtx) this._currentCtx.abort('new-turn');
 
     this._turnCount++;
     var turnId = this.callSid + '-t' + this._turnCount;
     var self   = this;
-    this._currentCtx      = new GenerationContext(turnId);
+    this._currentCtx = new GenerationContext(turnId);
     this._agentResponding = false;
 
     this.emit('turn:start', { turnId: turnId, callSid: this.callSid });
@@ -363,12 +367,84 @@ class RealtimePipeline extends EventEmitter {
     }
     if (this._history.length > 10) this._history = this._history.slice(-10);
 
+    // Patch D: One GenerationContext owns everything
+    var ctx     = this._currentCtx;
+    var tts     = new ElevenLabsWS(ctx);
+    var chunker = new SpeakableTextChunker(ctx);
     var fullResponse = '';
+
+    // Wire chunker -> ElevenLabs
+    chunker.on('chunk', function(data) {
+      if (ctx.aborted) return;
+      if (data.index === 0) {
+        self._metrics.mark('t5');
+        self._metrics.mark('t6');
+        console.log('[Pipeline] First chunk to ElevenLabs turn=' + turnId + ': "' + data.text + '"');
+      }
+      tts.send(data.text);
+    });
+
+    chunker.on('done', function() {
+      if (!ctx.aborted) {
+        tts.flush();
+        console.log('[Pipeline] Chunker done — flushed TTS turn=' + turnId);
+      }
+    });
+
+    // Wire ElevenLabs -> Twilio
+    tts.on('audio', function(data) {
+      if (ctx.aborted) return;
+      if (data.index === 0) {
+        self._metrics.mark('t7');
+        self._metrics.mark('t8');
+        self._agentResponding = true;
+        console.log('[Pipeline] First audio flowing turn=' + turnId);
+      }
+      if (self._audio) self._audio.sendOutbound(data.chunk);
+    });
+
+    tts.on('done', function() {
+      self._agentResponding = false;
+      ctx.complete();
+      var cleanFull = cleanForTTS(fullResponse);
+      if (cleanFull && !ctx.aborted) {
+        self._history.push({ role: 'assistant', content: cleanFull });
+      }
+      var expectedShape = classifyExpectedResponse(cleanFull);
+      self._turnController.setExpectedResponseShape(expectedShape);
+      self._turnController.reset();
+      var m = self._metrics.endTurn();
+      console.log('[Pipeline] Turn complete turn=' + turnId);
+      self.emit('turn:response', { turnId: turnId, callSid: self.callSid, text: cleanFull });
+      self.emit('turn:end', { callSid: self.callSid, metrics: m });
+      self._isProcessing = false;
+    });
+
+    tts.on('error', function(e) {
+      self._agentResponding = false;
+      console.error('[Pipeline] TTS error turn=' + turnId + ':', e.error && e.error.message);
+      self._isProcessing = false;
+    });
+
+    // Patch C+D: Connect ElevenLabs in PARALLEL with Claude request
+    var ttsConnected = false;
     try {
+      await tts.connect();
+      ttsConnected = true;
       this._metrics.mark('t3');
+      console.log('[Pipeline] ElevenLabs connected — starting Claude stream turn=' + turnId);
+    } catch (err) {
+      console.error('[Pipeline] ElevenLabs connect failed turn=' + turnId + ':', err.message);
+      this._isProcessing = false;
+      if (userMsgAdded) this._history.pop();
+      return;
+    }
+
+    // Stream Claude SSE — pipe tokens directly into chunker
+    try {
       var response = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
-        signal: this._currentCtx.signal,
+        signal: ctx.signal,
         headers: {
           'Content-Type':      'application/json',
           'x-api-key':         this._apiKey,
@@ -390,17 +466,17 @@ class RealtimePipeline extends EventEmitter {
 
       var reader     = response.body.getReader();
       var decoder    = new TextDecoder();
-      var buffer     = '';
+      var sseBuffer  = '';
       var firstToken = true;
 
       while (true) {
-        if (this._currentCtx.aborted) break;
+        if (ctx.aborted) break;
         var chunk = await reader.read();
         if (chunk.done) break;
 
-        buffer += decoder.decode(chunk.value, { stream: true });
-        var lines = buffer.split('\n');
-        buffer = lines.pop();
+        sseBuffer += decoder.decode(chunk.value, { stream: true });
+        var lines = sseBuffer.split('\n');
+        sseBuffer = lines.pop();
 
         for (var i = 0; i < lines.length; i++) {
           var line = lines[i];
@@ -410,14 +486,28 @@ class RealtimePipeline extends EventEmitter {
           try {
             var evt = JSON.parse(data);
             if (evt.type === 'content_block_delta' && evt.delta && evt.delta.type === 'text_delta') {
-              if (firstToken) { firstToken = false; this._metrics.mark('t4'); }
-              fullResponse += evt.delta.text;
+              var token = evt.delta.text;
+              if (firstToken) {
+                firstToken = false;
+                this._metrics.mark('t4');
+                console.log('[Pipeline] First Claude token turn=' + turnId);
+              }
+              // Patch C: accumulate for history AND pipe into chunker simultaneously
+              fullResponse += token;
+              chunker.write(cleanForTTS(token));
             }
           } catch(e) {}
         }
       }
+
+      // Claude complete — signal chunker to flush final chunk
+      if (!ctx.aborted) {
+        chunker.end();
+        console.log('[Pipeline] Claude complete — chunker ended turn=' + turnId);
+      }
+
     } catch (err) {
-      if (err.name === 'AbortError' || (this._currentCtx && this._currentCtx.aborted)) {
+      if (err.name === 'AbortError' || ctx.aborted) {
         console.log('[Pipeline] Claude aborted turn=' + turnId);
       } else {
         console.error('[Pipeline] Claude error turn=' + turnId + ':', err.message);
@@ -426,31 +516,9 @@ class RealtimePipeline extends EventEmitter {
             this._history[this._history.length - 1].content === userText) {
           this._history.pop();
         }
+        this._isProcessing = false;
       }
-      this._isProcessing = false;
-      return;
     }
-
-    if (!fullResponse.trim() || this._currentCtx.aborted) {
-      this._isProcessing = false;
-      return;
-    }
-
-    var cleanResponse = cleanForTTS(fullResponse);
-    console.log('[Pipeline] Claude response: "' + cleanResponse + '"');
-
-    if (!this._currentCtx.aborted) {
-      this._history.push({ role: 'assistant', content: cleanResponse });
-    }
-
-    // Classify what kind of response to expect next
-    var expectedShape = classifyExpectedResponse(cleanResponse);
-    this._turnController.setExpectedResponseShape(expectedShape);
-    this._turnController.reset();
-
-    this.emit('turn:response', { turnId: turnId, callSid: this.callSid, text: cleanResponse });
-    this._isProcessing = false;
-    this._speakText(cleanResponse, false);
   }
 
   async _speakText(text, isOpening) {
