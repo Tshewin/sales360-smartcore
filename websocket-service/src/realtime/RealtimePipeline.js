@@ -136,15 +136,6 @@ class TurnCompletionController {
     this.speechActive  = false;  // Patch A
   }
 
-  // Patch B/F: reopen a committed turn for continuation
-  // Called when SpeechStarted arrives during GENERATING — prospect wasn't done
-  reopenForContinuation() {
-    this.committed    = false;
-    this.speechActive = true;
-    this._cancelPendingCommit();
-    console.log('[TurnController] Reopened for continuation, buffered: "' + this._getUtterance() + '"');
-  }
-
   _getUtterance() {
     return this.finalSegments.join(' ').trim();
   }
@@ -227,17 +218,13 @@ class RealtimePipeline extends EventEmitter {
     this._metrics         = new RealtimeMetrics(this.callSid);
     this._history         = [];
     this._turnCount       = 0;
+    this._openingDone     = false;
+    this._agentResponding = false;
+    this._isProcessing    = false;
     this._ready           = false;
     this._apiKey          = process.env.ANTHROPIC_API_KEY || '';
     this._keepAliveTimer  = null;
     this._turnController  = null;
-
-    // Patch B: explicit state machine
-    // OPENING -> LISTENING -> COMMIT_PENDING -> GENERATING -> PLAYING -> LISTENING
-    // STOPPED is terminal
-    this._phase              = 'OPENING';
-    this._pendingUtterance   = null;   // Patch F: preserve caller continuations
-    this._lastAbortedUserText = null;  // tracks history pop on continuation abort
   }
 
   async start() {
@@ -254,67 +241,36 @@ class RealtimePipeline extends EventEmitter {
     this._stt = new DeepgramSTT();
 
     this._stt.on('interim', function(r) {
-      // Patch B: only process speech in LISTENING or COMMIT_PENDING
-      if (self._phase === 'OPENING' || self._phase === 'STOPPED') return;
-      if (self._phase === 'LISTENING' || self._phase === 'COMMIT_PENDING') {
-        self._turnController.onTranscript({ text: r.text, isFinal: false, speechFinal: false });
-        if (!self._metrics.currentTurn) {
-          self._metrics.startTurn();
-          self._metrics.mark('t1');
-        }
-        self.emit('turn:transcript', { callSid: self.callSid, text: r.text, isFinal: false });
+      if (!self._openingDone || self._agentResponding) return;
+      self._turnController.onTranscript({ text: r.text, isFinal: false, speechFinal: false });
+      if (!self._metrics.currentTurn) {
+        self._metrics.startTurn();
+        self._metrics.mark('t1');
       }
+      self.emit('turn:transcript', { callSid: self.callSid, text: r.text, isFinal: false });
     });
 
     this._stt.on('final', function(r) {
-      // Patch B: only accumulate finals in LISTENING or COMMIT_PENDING
-      if (self._phase === 'OPENING' || self._phase === 'STOPPED') {
-        console.log('[Pipeline] Ignoring transcript in phase ' + self._phase + ': "' + r.text + '"');
+      if (!self._openingDone) {
+        console.log('[Pipeline] Ignoring transcript during opening: "' + r.text + '"');
         return;
       }
-      if (self._phase === 'LISTENING' || self._phase === 'COMMIT_PENDING') {
-        console.log('[Pipeline] Transcript segment: "' + r.text + '" speechFinal=' + r.speechFinal);
-        self._turnController.onTranscript({ text: r.text, isFinal: true, speechFinal: r.speechFinal });
+      if (self._agentResponding) {
+        console.log('[Pipeline] Ignoring transcript during response: "' + r.text + '"');
+        return;
       }
-      // GENERATING/PLAYING: handled by speechStarted below
+      console.log('[Pipeline] Transcript segment: "' + r.text + '" speechFinal=' + r.speechFinal);
+      self._turnController.onTranscript({ text: r.text, isFinal: true, speechFinal: r.speechFinal });
     });
 
     this._stt.on('speechStarted', function() {
-      // Patch B: phase-aware SpeechStarted handling
-      switch (self._phase) {
-        case 'LISTENING':
-        case 'COMMIT_PENDING':
-          // Normal: prospect speaking, cancel any pending commit
-          console.log('[Pipeline] SpeechStarted phase=' + self._phase + ' — cancelling pending commit');
-          self._turnController.onSpeechStarted();
-          break;
-        case 'GENERATING':
-          // Prospect resumed during Claude generation = continuation after premature endpoint
-          // Pop the user message BEFORE aborting — prevents invalid_argument on re-send
-          console.log('[Pipeline] SpeechStarted during GENERATING — caller continuation, aborting response');
-          if (self._history.length > 0 && self._history[self._history.length - 1].role === 'user') {
-            self._history.pop();
-            console.log('[Pipeline] Popped user message from history before abort');
-          }
-          self._abortGeneration('caller-continuation');
-          self._turnController.reopenForContinuation();
-          self._phase = 'LISTENING';
-          break;
-        case 'PLAYING':
-          // Prospect speaking while agent audio plays = genuine barge-in
-          console.log('[Pipeline] SpeechStarted during PLAYING — barge-in, clearing audio');
-          if (self._audio) self._audio.clearOutbound();
-          self._abortGeneration('barge-in');
-          self._metrics.annotate({ bargedIn: true });
-          self._phase = 'LISTENING';
-          break;
-        default:
-          break;
-      }
+      if (!self._openingDone || self._agentResponding) return;
+      console.log('[Pipeline] SpeechStarted — cancelling pending commit');
+      self._turnController.onSpeechStarted();
     });
 
     this._stt.on('utteranceEnd', function() {
-      if (self._phase !== 'LISTENING' && self._phase !== 'COMMIT_PENDING') return;
+      if (!self._openingDone || self._agentResponding) return;
       console.log('[Pipeline] UtteranceEnd — backstop check');
       self._turnController.onUtteranceEnd();
     });
@@ -331,24 +287,20 @@ class RealtimePipeline extends EventEmitter {
 
     if (this.openingLine) {
       this._speakText(this.openingLine, true);
-      // Phase stays OPENING until opening TTS done fires -> LISTENING
     } else {
-      this._phase = 'LISTENING';  // Patch B: no opening line, go straight to listening
+      this._openingDone = true;
     }
   }
 
   _onTurnComplete(utterance) {
-    // Patch B: only process committed turns from LISTENING/COMMIT_PENDING
-    if (this._phase !== 'LISTENING' && this._phase !== 'COMMIT_PENDING') {
-      console.log('[Pipeline] Turn committed but phase=' + this._phase + ' — storing as pending: "' + utterance + '"');
-      this._pendingUtterance = utterance;
+    if (this._isProcessing) {
+      console.log('[Pipeline] Already processing — skipping: "' + utterance + '"');
       return;
     }
     if (this._audio) {
       this._audio.clearOutbound();
       console.log('[Pipeline] Outbound buffer cleared — turn complete');
     }
-    this._phase = 'COMMIT_PENDING';
     this._metrics.mark('t2');
     this._metrics.annotate({ transcript: utterance });
     this.emit('turn:transcript', { callSid: this.callSid, text: utterance, isFinal: true });
@@ -359,8 +311,7 @@ class RealtimePipeline extends EventEmitter {
   _startKeepalive() {
     var self = this;
     this._keepAliveTimer = setInterval(function() {
-      // Patch B: only send keepalive when LISTENING (not GENERATING/PLAYING)
-      if (self._audio && self._phase === 'LISTENING') {
+      if (self._audio && !self._agentResponding) {
         self._audio.sendOutbound(SILENCE_FRAME);
       }
     }, 20);
@@ -381,7 +332,6 @@ class RealtimePipeline extends EventEmitter {
 
   async stop() {
     this._ready = false;
-    this._phase = 'STOPPED';  // Patch B
     this._stopKeepalive();
     if (this._turnController) this._turnController._cancelPendingCommit();
     if (this._currentCtx) this._currentCtx.abort('call-end');
@@ -393,24 +343,15 @@ class RealtimePipeline extends EventEmitter {
     if (summary) console.log('[Pipeline] Metrics:', JSON.stringify(summary));
   }
 
-  // Patch B: abort current generation cleanly
-  _abortGeneration(reason) {
-    if (this._currentCtx && !this._currentCtx.aborted) {
-      this._currentCtx.abort(reason);
-    }
-    this._currentCtx = null;
-    console.log('[Pipeline] Generation aborted: ' + reason);
-  }
-
   async _respond(userText) {
-    // Patch B: transition to GENERATING
-    this._phase = 'GENERATING';
+    this._isProcessing = true;
     if (this._currentCtx) this._currentCtx.abort('new-turn');
 
     this._turnCount++;
     var turnId = this.callSid + '-t' + this._turnCount;
     var self   = this;
-    this._currentCtx = new GenerationContext(turnId);
+    this._currentCtx      = new GenerationContext(turnId);
+    this._agentResponding = false;
 
     this.emit('turn:start', { turnId: turnId, callSid: this.callSid });
 
@@ -420,7 +361,6 @@ class RealtimePipeline extends EventEmitter {
       this._history.push({ role: 'user', content: userText });
       userMsgAdded = true;
     }
-    this._lastAbortedUserText = null;  // clear abort tracking
     if (this._history.length > 10) this._history = this._history.slice(-10);
 
     var fullResponse = '';
@@ -487,12 +427,12 @@ class RealtimePipeline extends EventEmitter {
           this._history.pop();
         }
       }
-      this._phase = 'LISTENING';  // Patch B: restore phase on error
+      this._isProcessing = false;
       return;
     }
 
     if (!fullResponse.trim() || this._currentCtx.aborted) {
-      this._phase = 'LISTENING';  // Patch B: restore phase if aborted/empty
+      this._isProcessing = false;
       return;
     }
 
@@ -509,55 +449,41 @@ class RealtimePipeline extends EventEmitter {
     this._turnController.reset();
 
     this.emit('turn:response', { turnId: turnId, callSid: this.callSid, text: cleanResponse });
-    // Patch B: transition GENERATING -> PLAYING happens in _speakText
+    this._isProcessing = false;
     this._speakText(cleanResponse, false);
   }
 
   async _speakText(text, isOpening) {
     var self    = this;
     var turnNum = this._turnCount;
-    // Patch B: opening uses OPENING phase, responses transition GENERATING->PLAYING
-    if (!isOpening) {
-      this._phase = 'GENERATING';  // ensure phase is set before TTS starts
-    }
-    var ctx = new GenerationContext(this.callSid + (isOpening ? '-opening' : '-turn-' + turnNum));
-    var tts = new ElevenLabsWS(ctx);
+    var ctx     = new GenerationContext(this.callSid + (isOpening ? '-opening' : '-turn-' + turnNum));
+    var tts     = new ElevenLabsWS(ctx);
 
     tts.on('audio', function(data) {
       if (data.index === 0) {
-        // Patch B: transition to PLAYING when first audio flows
-        self._phase = 'PLAYING';
+        self._agentResponding = true;
         console.log('[Pipeline] Audio flowing — ' + (isOpening ? 'opening' : 'turn ' + turnNum));
       }
       if (self._audio) self._audio.sendOutbound(data.chunk);
     });
 
     tts.on('done', function() {
+      self._agentResponding = false;
       ctx.complete();
-      // Patch B: transition PLAYING -> LISTENING when TTS done
-      self._phase = 'LISTENING';
       if (isOpening) {
-        self._phase = 'LISTENING';  // Patch B: opening complete, now listen
+        self._openingDone = true;
         self._history.push({ role: 'assistant', content: text });
-        console.log('[Pipeline] Opening delivered — phase=LISTENING');
+        console.log('[Pipeline] Opening delivered — listening');
       } else {
         var m = self._metrics.endTurn();
-        console.log('[Pipeline] Turn complete — phase=LISTENING turn=' + turnNum);
+        console.log('[Pipeline] Turn complete — listening turn=' + turnNum);
         self.emit('turn:end', { callSid: self.callSid, metrics: m });
-        // Patch F: if caller continued during GENERATING, process now
-        if (self._pendingUtterance) {
-          var pending = self._pendingUtterance;
-          self._pendingUtterance = null;
-          console.log('[Pipeline] Processing pending utterance: "' + pending + '"');
-          self._onTurnComplete(pending);
-        }
       }
     });
 
     tts.on('error', function(e) {
-      // Patch B: restore LISTENING on TTS error
-      self._phase = 'LISTENING';
-      if (isOpening) self._history.push({ role: 'assistant', content: '' });
+      self._agentResponding = false;
+      if (isOpening) self._openingDone = true;
       console.error('[Pipeline] TTS error:', e.error && e.error.message);
     });
 
@@ -567,8 +493,8 @@ class RealtimePipeline extends EventEmitter {
       tts.flush();
       console.log('[Pipeline] Sent to TTS: "' + text + '"');
     } catch (err) {
-      self._phase = 'LISTENING';  // Patch B: restore on connect failure
-      if (isOpening) self._history.push({ role: 'assistant', content: '' });
+      self._agentResponding = false;
+      if (isOpening) self._openingDone = true;
       console.error('[Pipeline] TTS connect failed:', err.message);
     }
   }
