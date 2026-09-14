@@ -20,13 +20,32 @@ class MediaStreamHandler extends EventEmitter {
     this._systemPrompt = opts.systemPrompt || '';
     this._openingLine  = opts.openingLine || '';
 
-    this._streamSid  = null;
-    this._pipeline   = null;
-    this._rtPipeline = null;
-    this._metrics    = new RealtimeMetrics(this._callSid);
-    this._turnCount  = 0;
+    this._streamSid          = null;
+    this._pipeline           = null;
+    this._rtPipeline         = null;
+    this._metrics            = new RealtimeMetrics(this._callSid);
+    this._turnCount          = 0;
+    this._transportPingTimer = null;
 
     this._setupWebSocket();
+    this._startTransportPing();
+  }
+
+  _startTransportPing() {
+    // WebSocket protocol-level ping every 15s — keeps Railway proxy alive
+    var self = this;
+    this._transportPingTimer = setInterval(function() {
+      if (self._ws && self._ws.readyState === 1) {
+        self._ws.ping();
+      }
+    }, 15000);
+  }
+
+  _stopTransportPing() {
+    if (this._transportPingTimer) {
+      clearInterval(this._transportPingTimer);
+      this._transportPingTimer = null;
+    }
   }
 
   _setupWebSocket() {
