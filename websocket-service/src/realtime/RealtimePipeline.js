@@ -235,8 +235,9 @@ class RealtimePipeline extends EventEmitter {
     // Patch B: explicit state machine
     // OPENING -> LISTENING -> COMMIT_PENDING -> GENERATING -> PLAYING -> LISTENING
     // STOPPED is terminal
-    this._phase           = 'OPENING';
-    this._pendingUtterance = null;   // Patch F: preserve caller continuations
+    this._phase              = 'OPENING';
+    this._pendingUtterance   = null;   // Patch F: preserve caller continuations
+    this._lastAbortedUserText = null;  // tracks history pop on continuation abort
   }
 
   async start() {
@@ -289,8 +290,12 @@ class RealtimePipeline extends EventEmitter {
           break;
         case 'GENERATING':
           // Prospect resumed during Claude generation = continuation after premature endpoint
-          // Abort generation, reopen the committed utterance, return to LISTENING
+          // Pop the user message BEFORE aborting — prevents invalid_argument on re-send
           console.log('[Pipeline] SpeechStarted during GENERATING — caller continuation, aborting response');
+          if (self._history.length > 0 && self._history[self._history.length - 1].role === 'user') {
+            self._history.pop();
+            console.log('[Pipeline] Popped user message from history before abort');
+          }
           self._abortGeneration('caller-continuation');
           self._turnController.reopenForContinuation();
           self._phase = 'LISTENING';
@@ -415,6 +420,7 @@ class RealtimePipeline extends EventEmitter {
       this._history.push({ role: 'user', content: userText });
       userMsgAdded = true;
     }
+    this._lastAbortedUserText = null;  // clear abort tracking
     if (this._history.length > 10) this._history = this._history.slice(-10);
 
     var fullResponse = '';
