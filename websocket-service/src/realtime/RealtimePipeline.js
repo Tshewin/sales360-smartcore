@@ -73,19 +73,6 @@ var BASE_GRACE = {
   unknown:          400,
 };
 
-// Short instant acknowledgements played when agent is interrupted
-// Chosen randomly to sound natural and varied
-var BARGE_IN_ACKS = [
-  'Of course.',
-  'Go ahead.',
-  'Please, continue.',
-  "I'm listening.",
-];
-
-function getBargeInAck() {
-  return BARGE_IN_ACKS[Math.floor(Math.random() * BARGE_IN_ACKS.length)];
-}
-
 // ─── TurnCompletionController ─────────────────────────────────────────────────
 class TurnCompletionController {
   constructor(onTurnComplete) {
@@ -234,9 +221,8 @@ class RealtimePipeline extends EventEmitter {
     this._turnCount       = 0;
     this._openingDone     = false;
     this._agentResponding = false;
-    this._isProcessing            = false;
-    this._ready                   = false;
-    this._lastTurnWasInterruption = false;
+    this._isProcessing    = false;
+    this._ready           = false;
     this._apiKey          = process.env.ANTHROPIC_API_KEY || '';
     this._keepAliveTimer  = null;
     this._turnController  = null;
@@ -271,9 +257,7 @@ class RealtimePipeline extends EventEmitter {
         return;
       }
       if (self._agentResponding) {
-        // Mark this as an interruption so next turn plays ack
-        self._lastTurnWasInterruption = true;
-        console.log('[Pipeline] Transcript during agent response — marking interruption: "' + r.text + '"');
+        console.log('[Pipeline] Ignoring transcript during response: "' + r.text + '"');
         return;
       }
       console.log('[Pipeline] Transcript segment: "' + r.text + '" speechFinal=' + r.speechFinal);
@@ -314,10 +298,6 @@ class RealtimePipeline extends EventEmitter {
       console.log('[Pipeline] Already processing — skipping: "' + utterance + '"');
       return;
     }
-
-    var wasInterruption = this._lastTurnWasInterruption;
-    this._lastTurnWasInterruption = false;
-
     if (this._audio) {
       this._audio.clearOutbound();
       console.log('[Pipeline] Outbound buffer cleared — turn complete');
@@ -325,14 +305,6 @@ class RealtimePipeline extends EventEmitter {
     this._metrics.mark('t2');
     this._metrics.annotate({ transcript: utterance });
     this.emit('turn:transcript', { callSid: this.callSid, text: utterance, isFinal: true });
-
-    // If this was a barge-in, play instant acknowledgement while Claude generates
-    if (wasInterruption) {
-      var ack = getBargeInAck();
-      console.log('[Pipeline] Playing barge-in ack: "' + ack + '"');
-      this._speakAck(ack);
-    }
-
     console.log('[Pipeline] Sending to Claude: "' + utterance + '"');
     this._respond(utterance);
   }
@@ -547,34 +519,6 @@ class RealtimePipeline extends EventEmitter {
         }
         this._isProcessing = false;
       }
-    }
-  }
-
-  async _speakAck(text) {
-    // Play a short acknowledgement instantly — no history, no Claude involvement
-    var self = this;
-    var ctx  = new GenerationContext(this.callSid + '-ack-' + Date.now());
-    var tts  = new ElevenLabsWS(ctx);
-
-    tts.on('audio', function(data) {
-      if (self._audio) self._audio.sendOutbound(data.chunk);
-    });
-
-    tts.on('done', function() {
-      ctx.complete();
-      console.log('[Pipeline] Barge-in ack delivered');
-    });
-
-    tts.on('error', function(e) {
-      console.error('[Pipeline] Ack TTS error:', e.error && e.error.message);
-    });
-
-    try {
-      await tts.connect();
-      tts.send(text);
-      tts.flush();
-    } catch (err) {
-      console.error('[Pipeline] Ack TTS connect failed:', err.message);
     }
   }
 
