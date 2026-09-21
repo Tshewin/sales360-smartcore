@@ -175,9 +175,28 @@ const PORT = process.env.PORT || 8080;
 
 // ADR-002 Week 2 — attach realtime routes
 const { attachMediaStreamRoutes, mediaWss } = require('./src/realtime/media-stream-routes');
+const { Sales360MasterPromptV2 } = require('./SALES360-MASTER-PROMPT-V2.1');
 
-var REALTIME_SYSTEM_PROMPT = process.env.REALTIME_SYSTEM_PROMPT || 'You are Sales360 AI, the world\'s most intelligent sales agent. You are on a live phone call. Keep responses to 2-3 SHORT sentences. Be warm, direct, conversational. Never mention you are an AI unless asked. Qualify the prospect and book a meeting.';
-var REALTIME_OPENING = process.env.REALTIME_OPENING || 'Good afternoon, this is Sales360 AI calling. Do you have a couple of minutes?';
+// Default lead data for testing — replaced with real Zoho data per call in Sprint 3
+var defaultLeadData = {
+  name:        'there',
+  region:      'uk',
+  brokerName:  'Sales360',
+  intentScore: 0,
+  source:      'inbound enquiry',
+  product:     null,
+  experience:  null,
+  pain:        null,
+  capital:     null,
+  lastAction:  null
+};
+
+// Railway REALTIME_SYSTEM_PROMPT overrides master prompt if set (for emergency overrides only)
+var REALTIME_SYSTEM_PROMPT = process.env.REALTIME_SYSTEM_PROMPT ||
+  Sales360MasterPromptV2.buildPrompt(defaultLeadData);
+
+var REALTIME_OPENING = process.env.REALTIME_OPENING ||
+  'Hello, this is Sales360 calling. Is this a good time for a quick 2-minute conversation?';
 
 attachMediaStreamRoutes(server, app, {
   echoMode:     false,

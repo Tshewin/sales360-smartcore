@@ -365,7 +365,7 @@ class RealtimePipeline extends EventEmitter {
       this._history.push({ role: 'user', content: userText });
       userMsgAdded = true;
     }
-    if (this._history.length > 10) this._history = this._history.slice(-10);
+    if (this._history.length > 20) this._history = this._history.slice(-20);
 
     // Patch D: One GenerationContext owns everything
     var ctx     = this._currentCtx;
