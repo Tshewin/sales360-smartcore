@@ -381,12 +381,15 @@ class RealtimePipeline extends EventEmitter {
     // Wire chunker -> ElevenLabs
     chunker.on('chunk', function(data) {
       if (ctx.aborted) return;
+      // Strip metadata JSON from each chunk before sending to ElevenLabs
+      var cleanChunk = cleanForTTS(data.text);
+      if (!cleanChunk) return;  // skip empty chunks after cleaning
       if (data.index === 0) {
         self._metrics.mark('t5');
         self._metrics.mark('t6');
-        console.log('[Pipeline] First chunk to ElevenLabs turn=' + turnId + ': "' + data.text + '"');
+        console.log('[Pipeline] First chunk to ElevenLabs turn=' + turnId + ': "' + cleanChunk + '"');
       }
-      tts.send(data.text);
+      tts.send(cleanChunk);
     });
 
     chunker.on('done', function() {
