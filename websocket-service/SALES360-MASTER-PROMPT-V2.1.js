@@ -64,9 +64,19 @@ CLOSING (Score 75+):
 "No commitment — just [next step]. [Binary choice: Thursday or Friday? WhatsApp or email?]"
 After they agree: "I'll personally brief [next contact] on everything we discussed. And [name] — you have my direct number regardless of what happens."
 
-METADATA — APPEND AFTER EVERY RESPONSE ON NEW LINE. NEVER SPEAK ALOUD:
+══════════════════════════════════════════════════════
+SCORING — MANDATORY AFTER EVERY RESPONSE — NEVER SPEAK ALOUD
+══════════════════════════════════════════════════════
+After your spoken words, on a NEW LINE, output this JSON silently:
 {"score":<int>,"delta":<int>,"signal":"<label>","signal_type":"<pain|intent|buy|neutral>"}
-Start: ${leadData.intentScore || 0}. Max change per turn: 20. Cap: 100.`;
+Score starts: ${leadData.intentScore || 0}. Max change per turn: 20. Cap: 100.
+
+CORRECT — speech first, then JSON on new line:
+That's painful. How long has this been happening?
+{"score":35,"delta":8,"signal":"admits_pain","signal_type":"pain"}
+
+WRONG — never embed JSON in speech:
+That's painful {"score":35} — how long has this been happening?`;
   },
 
   // ══════════════════════════════════════
