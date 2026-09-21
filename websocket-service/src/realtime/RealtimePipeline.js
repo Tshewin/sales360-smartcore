@@ -29,6 +29,11 @@ var SILENCE_FRAME = Buffer.alloc(160, 0xFF);
 
 function cleanForTTS(text) {
   return text
+    // Strip Sales360 metadata JSON block — never speak aloud
+    .replace(/\{\s*"score"\s*:.*?\}/gs, '')
+    // Strip any trailing JSON-like blocks on new lines
+    .replace(/\n\s*\{[^}]*\}\s*$/gm, '')
+    // Strip emojis
     .replace(/[\u{1F000}-\u{1FFFF}]/gu, '')
     .replace(/[\u{2600}-\u{27FF}]/gu, '')
     .replace(/[\u{FE00}-\u{FEFF}]/gu, '')
