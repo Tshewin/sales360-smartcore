@@ -175,12 +175,12 @@ const PORT = process.env.PORT || 8080;
 
 // ADR-002 Week 2 — attach realtime routes
 const { attachMediaStreamRoutes, mediaWss } = require('./src/realtime/media-stream-routes');
-const { Sales360MasterPromptV2 } = require('./SALES360-MASTER-PROMPT-V2.1');
+const { Sales360MasterPromptV2 } = require('./SALES360-MASTER-PROMPT-V2');
 
 // Default lead data for testing — replaced with real Zoho data per call in Sprint 3
 var defaultLeadData = {
   name:        'there',
-  region:      'uk',
+  region:      'nigeria',
   brokerName:  'Sales360',
   intentScore: 0,
   source:      'inbound enquiry',
