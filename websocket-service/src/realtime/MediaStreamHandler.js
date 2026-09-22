@@ -85,7 +85,12 @@ class MediaStreamHandler extends EventEmitter {
         break;
 
       case 'mark':
-        this.emit('mark', { name: msg.mark && msg.mark.name, callSid: this._callSid });
+        var markName = msg.mark && msg.mark.name;
+        this.emit('mark', { name: markName, callSid: this._callSid });
+        // Patch E: forward playback mark to pipeline so it knows Twilio finished playing
+        if (this._rtPipeline && markName) {
+          this._rtPipeline.handlePlaybackMark(markName);
+        }
         break;
 
       case 'stop':

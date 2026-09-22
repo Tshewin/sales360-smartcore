@@ -1,16 +1,17 @@
 /**
  * Sales360 Realtime Streaming — AudioPipeline
- * ADR-002 Week 2 (debug + format fix)
+ * Patch E: Add sendMark() + lastOutboundAt tracking
  */
 
 'use strict';
 
 class AudioPipeline {
   constructor(twilioWs, streamSid) {
-    this._ws         = twilioWs;
-    this._streamSid  = streamSid;
+    this._ws             = twilioWs;
+    this._streamSid      = streamSid;
     this._outboundActive = false;
-    this._chunksSent = 0;
+    this._chunksSent     = 0;
+    this._lastOutboundAt = Date.now();  // Patch E: track last outbound write
   }
 
   decodeInbound(mediaMsg) {
@@ -37,11 +38,24 @@ class AudioPipeline {
     this._ws.send(msg);
     this._chunksSent++;
     this._outboundActive = true;
+    this._lastOutboundAt = Date.now();  // Patch E
 
-    // Log first chunk and every 10th after
     if (false) {
       console.log('[AudioPipeline] Sent chunk #' + this._chunksSent + ' streamSid=' + this._streamSid + ' bytes=' + audioChunk.length);
     }
+  }
+
+  // Patch E: Send a Twilio mark event — Twilio echoes it back when buffer plays to that point
+  sendMark(name) {
+    if (!this._ws || this._ws.readyState !== 1) return;
+    if (!this._streamSid) return;
+    this._ws.send(JSON.stringify({
+      event:     'mark',
+      streamSid: this._streamSid,
+      mark:      { name: name },
+    }));
+    this._lastOutboundAt = Date.now();
+    console.log('[AudioPipeline] Mark sent: ' + name);
   }
 
   clearOutbound() {
@@ -51,6 +65,7 @@ class AudioPipeline {
       streamSid: this._streamSid,
     }));
     this._outboundActive = false;
+    this._lastOutboundAt = Date.now();
     console.log('[AudioPipeline] Cleared outbound buffer');
   }
 
@@ -59,9 +74,10 @@ class AudioPipeline {
     console.log('[AudioPipeline] StreamSid set: ' + sid);
   }
 
-  get isActive()   { return this._outboundActive; }
-  get streamSid()  { return this._streamSid; }
-  get chunksSent() { return this._chunksSent; }
+  get isActive()        { return this._outboundActive; }
+  get streamSid()       { return this._streamSid; }
+  get chunksSent()      { return this._chunksSent; }
+  get lastOutboundAt()  { return this._lastOutboundAt; }  // Patch E
 }
 
 module.exports = AudioPipeline;

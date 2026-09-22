@@ -226,11 +226,13 @@ class RealtimePipeline extends EventEmitter {
     this._turnCount       = 0;
     this._openingDone     = false;
     this._agentResponding = false;
-    this._isProcessing    = false;
-    this._ready           = false;
-    this._apiKey          = process.env.ANTHROPIC_API_KEY || '';
-    this._keepAliveTimer  = null;
-    this._turnController  = null;
+    this._isProcessing            = false;
+    this._ready                   = false;
+    this._apiKey                  = process.env.ANTHROPIC_API_KEY || '';
+    this._keepAliveTimer          = null;
+    this._turnController          = null;
+    this._awaitingPlaybackMark    = false;  // Patch E
+    this._lastTurnWasInterruption = false;
   }
 
   async start() {
@@ -312,6 +314,16 @@ class RealtimePipeline extends EventEmitter {
     this.emit('turn:transcript', { callSid: this.callSid, text: utterance, isFinal: true });
     console.log('[Pipeline] Sending to Claude: "' + utterance + '"');
     this._respond(utterance);
+  }
+
+  // Patch E: called when Twilio echoes back a mark — confirms audio played to that point
+  handlePlaybackMark(name) {
+    if (name && name.indexOf('turn:') === 0) {
+      console.log('[Pipeline] Playback mark received: ' + name);
+      this._awaitingPlaybackMark = false;
+      this._agentResponding      = false;
+      this.emit('playback:complete', { mark: name, callSid: this.callSid });
+    }
   }
 
   _startKeepalive() {
@@ -545,15 +557,23 @@ class RealtimePipeline extends EventEmitter {
     });
 
     tts.on('done', function() {
-      self._agentResponding = false;
       ctx.complete();
       if (isOpening) {
+        self._agentResponding = false;
         self._openingDone = true;
         self._history.push({ role: 'assistant', content: text });
         console.log('[Pipeline] Opening delivered — listening');
       } else {
+        // Patch E: send Twilio mark — echoed back when Twilio finishes playing buffered audio
+        var markName = 'turn:' + turnNum + ':complete';
+        if (self._audio) {
+          self._awaitingPlaybackMark = true;
+          self._audio.sendMark(markName);
+          console.log('[Pipeline] TTS done — awaiting Twilio playback mark: ' + markName);
+        } else {
+          self._agentResponding = false;
+        }
         var m = self._metrics.endTurn();
-        console.log('[Pipeline] Turn complete — listening turn=' + turnNum);
         self.emit('turn:end', { callSid: self.callSid, metrics: m });
       }
     });
