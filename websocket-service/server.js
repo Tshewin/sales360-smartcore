@@ -174,10 +174,15 @@ app.get('/', function(req, res) {
 const PORT = process.env.PORT || 8080;
 
 // ADR-002 Week 2 — attach realtime routes
-const { attachMediaStreamRoutes, mediaWss } = require('./src/realtime/media-stream-routes');
+const { attachMediaStreamRoutes, mediaWss, activeSessions } = require('./src/realtime/media-stream-routes');
 const { Sales360MasterPromptV2 } = require('./SALES360-MASTER-PROMPT-V2');
 
-// Default lead data for testing — replaced with real Zoho data per call in Sprint 3
+// ─── Per-call session store ────────────────────────────────────────────────
+// Maps callSid → { systemPrompt, openingLine, leadData }
+// Set BEFORE Twilio connects the WebSocket so the handler picks it up
+var callSessionStore = {};
+
+// ─── Default lead data for /twilio/media-test ─────────────────────────────
 var defaultLeadData = {
   name:        'there',
   region:      'nigeria',
@@ -191,17 +196,119 @@ var defaultLeadData = {
   lastAction:  null
 };
 
-// Railway REALTIME_SYSTEM_PROMPT overrides master prompt if set (for emergency overrides only)
-var REALTIME_SYSTEM_PROMPT = process.env.REALTIME_SYSTEM_PROMPT ||
+// Default prompt for test calls
+var DEFAULT_SYSTEM_PROMPT = process.env.REALTIME_SYSTEM_PROMPT ||
   Sales360MasterPromptV2.buildPrompt(defaultLeadData);
 
-var REALTIME_OPENING = process.env.REALTIME_OPENING ||
+var DEFAULT_OPENING = process.env.REALTIME_OPENING ||
   'Hello, this is Sales360 calling. Is this a good time for a quick 2-minute conversation?';
+
+// ─── /twilio/media-live — Zoho-enriched production endpoint ───────────────
+// Called by Twilio when a lead call starts (via Zoho Deluge or manual trigger)
+// Expects ?leadId=XXX in query string
+app.post('/twilio/media-live', async function(req, res) {
+  var host   = req.headers.host || 'localhost';
+  var wsUrl  = 'wss://' + host + '/twilio/media';
+  var leadId = req.query.leadId || req.body.leadId || null;
+  var callSid = req.body.CallSid || null;
+
+  console.log('[MediaLive] Incoming call — CallSid=' + callSid + ' leadId=' + leadId);
+
+  var systemPrompt = DEFAULT_SYSTEM_PROMPT;
+  var openingLine  = DEFAULT_OPENING;
+  var leadData     = defaultLeadData;
+
+  // Enrich from Zoho if leadId provided
+  if (leadId && zohoService.isEnabled()) {
+    try {
+      console.log('[MediaLive] Enriching lead from Zoho: ' + leadId);
+      var enriched = await zohoService.enrichLeadBeforeCall(leadId);
+
+      if (enriched) {
+        // Map Zoho lead data to prompt format
+        leadData = {
+          name:        enriched.fullName ? enriched.fullName.split(' ')[0] : 'there',
+          region:      _mapRegion(enriched.country),
+          brokerName:  enriched.company || 'Sales360',
+          intentScore: enriched.intentScore || 0,
+          source:      enriched.leadSource || 'inbound enquiry',
+          product:     enriched.interestedServices || null,
+          experience:  null,
+          pain:        enriched.currentChallenges || null,
+          capital:     null,
+          lastAction:  enriched.lastOutcome || null,
+          industry:    enriched.industryType || null,
+          leadType:    enriched.leadType || 'B2B',
+        };
+
+        systemPrompt = Sales360MasterPromptV2.buildPrompt(leadData);
+
+        // Personalise opening with prospect's first name
+        var firstName = leadData.name !== 'there' ? ', ' + leadData.name : '';
+        openingLine = 'Hello' + firstName + ', this is Sales360 calling. Is this a good time for a quick 2-minute conversation?';
+
+        console.log('[MediaLive] Prompt built for: ' + enriched.fullName + ' | Region: ' + leadData.region + ' | Score: ' + leadData.intentScore);
+      } else {
+        console.warn('[MediaLive] Zoho enrichment returned null — using defaults');
+      }
+    } catch (err) {
+      console.error('[MediaLive] Zoho enrichment error:', err.message, '— using defaults');
+    }
+  } else {
+    console.log('[MediaLive] No leadId or Zoho disabled — using default prompt');
+  }
+
+  // Store session data keyed by CallSid for the WebSocket handler
+  if (callSid) {
+    callSessionStore[callSid] = { systemPrompt, openingLine, leadData, leadId };
+    // Clean up after 5 minutes
+    setTimeout(function() { delete callSessionStore[callSid]; }, 300000);
+  }
+
+  // Return TwiML
+  var twiml = '<?xml version="1.0" encoding="UTF-8"?>';
+  twiml += '<Response>';
+  twiml += '<Connect>';
+  twiml += '<Stream url="' + wsUrl + '" />';
+  twiml += '</Connect>';
+  twiml += '</Response>';
+  res.type('text/xml').send(twiml);
+});
+
+// ─── GET version for browser testing ──────────────────────────────────────
+app.get('/twilio/media-live', async function(req, res) {
+  var host   = req.headers.host || 'localhost';
+  var wsUrl  = 'wss://' + host + '/twilio/media';
+  var twiml  = '<?xml version="1.0" encoding="UTF-8"?>';
+  twiml += '<Response>';
+  twiml += '<Connect>';
+  twiml += '<Stream url="' + wsUrl + '" />';
+  twiml += '</Connect>';
+  twiml += '</Response>';
+  res.type('text/xml').send(twiml);
+});
+
+// ─── Helper: map country string to region key ──────────────────────────────
+function _mapRegion(country) {
+  if (!country) return 'nigeria';
+  var c = country.toLowerCase();
+  if (c.includes('nigeria'))                      return 'nigeria';
+  if (c.includes('united kingdom') || c === 'uk') return 'uk';
+  if (c.includes('united arab') || c.includes('dubai') || c.includes('uae')) return 'uae';
+  if (c.includes('ghana'))                        return 'ghana';
+  if (c.includes('kenya'))                        return 'kenya';
+  if (c.includes('south africa'))                 return 'south_africa';
+  return 'nigeria';  // default
+}
+
+// ─── Export session store so media-stream-routes can read it ──────────────
+global.callSessionStore = callSessionStore;
 
 attachMediaStreamRoutes(server, app, {
   echoMode:     false,
-  systemPrompt: REALTIME_SYSTEM_PROMPT,
-  openingLine:  REALTIME_OPENING,
+  systemPrompt: DEFAULT_SYSTEM_PROMPT,
+  openingLine:  DEFAULT_OPENING,
+  sessionStore: callSessionStore,
 });
 
 // SINGLE upgrade handler — routes to correct WSS based on path

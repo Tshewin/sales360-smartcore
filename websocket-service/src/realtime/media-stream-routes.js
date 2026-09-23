@@ -29,11 +29,21 @@ function attachMediaStreamRoutes(server, app, opts) {
 
     console.log('[MediaStream] New session CallSid=' + callSid + ' echoMode=' + echoMode);
 
+    // Sprint 3: Check session store for Zoho-enriched prompt
+    var sessionStore = opts.sessionStore || global.callSessionStore || {};
+    var session      = sessionStore[callSid];
+    var sessionPrompt  = (session && session.systemPrompt) || systemPrompt;
+    var sessionOpening = (session && session.openingLine)  || openingLine;
+
+    if (session) {
+      console.log('[MediaStream] Zoho-enriched session found for CallSid=' + callSid);
+    }
+
     var handler = new MediaStreamHandler(ws, {
       callSid:      callSid,
       echoMode:     echoMode,
-      systemPrompt: systemPrompt,
-      openingLine:  openingLine,
+      systemPrompt: sessionPrompt,
+      openingLine:  sessionOpening,
     });
 
     activeSessions.set(callSid, handler);
