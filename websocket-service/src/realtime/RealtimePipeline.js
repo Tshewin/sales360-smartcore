@@ -258,10 +258,12 @@ class RealtimePipeline extends EventEmitter {
     this._stt.on('interim', function(r) {
       if (!self._openingDone || self._agentResponding) return;
       self._turnController.onTranscript({ text: r.text, isFinal: false, speechFinal: false });
+      // Patch H: startTurn now triggered by SpeechStarted (t0)
+      // Fallback: if SpeechStarted was missed, start turn here
       if (!self._metrics.currentTurn) {
         self._metrics.startTurn();
-        self._metrics.mark('t1');
       }
+      self._metrics.mark('t1');
       self.emit('turn:transcript', { callSid: self.callSid, text: r.text, isFinal: false });
     });
 
@@ -280,6 +282,11 @@ class RealtimePipeline extends EventEmitter {
 
     this._stt.on('speechStarted', function() {
       if (!self._openingDone || self._agentResponding) return;
+      // Patch H: t0 = caller starts speaking (true turn start)
+      if (!self._metrics.currentTurn) {
+        self._metrics.startTurn();
+      }
+      self._metrics.mark('t0');
       console.log('[Pipeline] SpeechStarted — cancelling pending commit');
       self._turnController.onSpeechStarted();
     });
@@ -350,6 +357,8 @@ class RealtimePipeline extends EventEmitter {
       console.log('[Pipeline] Playback mark received: ' + name);
       this._awaitingPlaybackMark = false;
       this._agentResponding      = false;
+      // Patch H: t9 = Twilio playback-complete mark (true end of turn)
+      this._metrics.mark('t9');
       this.emit('playback:complete', { mark: name, callSid: this.callSid });
     }
   }
