@@ -272,7 +272,25 @@ class RealtimePipeline extends EventEmitter {
     });
 
     this._stt.on('speechStarted', function() {
-      if (!self._openingDone || self._agentResponding) return;
+      if (!self._openingDone) return;
+
+      if (self._agentResponding) {
+        // Patch B: prospect speaks while agent is talking = genuine barge-in
+        // Clear Twilio audio buffer immediately — agent stops mid-sentence
+        console.log('[Pipeline] SpeechStarted during agent response — barge-in detected');
+        if (self._audio) self._audio.clearOutbound();
+        self._agentResponding      = false;
+        self._awaitingPlaybackMark = false;
+        self._isProcessing         = false;
+        // Abort any in-flight Claude generation
+        if (self._currentCtx && !self._currentCtx.aborted) {
+          self._currentCtx.abort('barge-in');
+        }
+        self._metrics.annotate({ bargedIn: true });
+        return;
+      }
+
+      // Normal case — prospect speaks during listening phase
       console.log('[Pipeline] SpeechStarted — cancelling pending commit');
       self._turnController.onSpeechStarted();
     });
