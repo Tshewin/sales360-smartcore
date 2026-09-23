@@ -239,6 +239,7 @@ class RealtimePipeline extends EventEmitter {
     this._agentSaidGoodbye        = false;  // call termination
     this._prospectSaidGoodbye     = false;  // call termination
     this._callTerminated          = false;  // prevents double termination
+    this._pendingContinuation     = null;   // Patch F: utterance received during generation
   }
 
   async start() {
@@ -307,6 +308,14 @@ class RealtimePipeline extends EventEmitter {
   }
 
   _onTurnComplete(utterance) {
+    // Patch F: If agent is currently responding, preserve utterance as continuation
+    // Will be processed after TTS completes — no speech lost
+    if (this._agentResponding || this._awaitingPlaybackMark) {
+      console.log('[Pipeline] Patch F: utterance during playback — storing as continuation: "' + utterance + '"');
+      this._pendingContinuation = utterance;
+      return;
+    }
+
     if (this._isProcessing) {
       console.log('[Pipeline] Already processing — skipping: "' + utterance + '"');
       return;
@@ -373,13 +382,23 @@ class RealtimePipeline extends EventEmitter {
   }
 
   _startKeepalive() {
+    // Patch G: Replace 50 silence frames/sec with sparse heartbeat
+    // Send ONE silence frame only after 5s of outbound inactivity
+    // Suspend during agent response — real audio keeps transport alive
     var self = this;
+    var HEARTBEAT_INTERVAL_MS = 5000;
     this._keepAliveTimer = setInterval(function() {
-      if (self._audio && !self._agentResponding) {
+      if (!self._audio) return;
+      if (self._agentResponding) return;        // real audio is flowing
+      if (self._awaitingPlaybackMark) return;   // Twilio still playing
+      if (self._callTerminated) return;         // call is over
+      var idleFor = Date.now() - self._audio.lastOutboundAt;
+      if (idleFor >= HEARTBEAT_INTERVAL_MS) {
         self._audio.sendOutbound(SILENCE_FRAME);
+        console.log('[Pipeline] Sparse heartbeat sent — idle ' + Math.round(idleFor/1000) + 's');
       }
-    }, 20);
-    console.log('[Pipeline] Keepalive started CallSid=' + this.callSid);
+    }, 1000);
+    console.log('[Pipeline] Keepalive started (sparse 5s heartbeat) CallSid=' + this.callSid);
   }
 
   _stopKeepalive() {
@@ -483,6 +502,14 @@ class RealtimePipeline extends EventEmitter {
       console.log('[Pipeline] Turn complete turn=' + turnId);
       self.emit('turn:response', { turnId: turnId, callSid: self.callSid, text: cleanFull });
       self.emit('turn:end', { callSid: self.callSid, metrics: m });
+
+      // Patch F: Process any pending continuation stored during playback
+      if (self._pendingContinuation) {
+        var continuation = self._pendingContinuation;
+        self._pendingContinuation = null;
+        console.log('[Pipeline] Patch F: processing pending continuation: "' + continuation + '"');
+        setTimeout(function() { self._onTurnComplete(continuation); }, 300);
+      }
 
       // Detect agent goodbye — set flag, wait for prospect to acknowledge
       if (GOODBYE_PHRASES.test(cleanFull)) {
