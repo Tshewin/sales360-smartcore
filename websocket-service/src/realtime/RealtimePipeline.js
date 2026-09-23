@@ -238,6 +238,7 @@ class RealtimePipeline extends EventEmitter {
     this._lastTurnWasInterruption = false;
     this._agentSaidGoodbye        = false;  // call termination
     this._prospectSaidGoodbye     = false;  // call termination
+    this._callTerminated          = false;  // prevents double termination
   }
 
   async start() {
@@ -346,6 +347,9 @@ class RealtimePipeline extends EventEmitter {
 
   // End the call via Twilio REST API when agent says goodbye
   _endCall() {
+    if (this._callTerminated) return;  // prevent double termination
+    this._callTerminated = true;
+    this._ready = false;  // stop processing new transcripts
     var sid   = process.env.TWILIO_ACCOUNT_SID;
     var token = process.env.TWILIO_AUTH_TOKEN;
     if (!sid || !token || !this.callSid) return;
