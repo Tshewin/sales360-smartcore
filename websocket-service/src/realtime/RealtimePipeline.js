@@ -27,6 +27,9 @@ const config           = require('./config');
 
 var SILENCE_FRAME = Buffer.alloc(160, 0xFF);
 
+// Goodbye phrases — used for both agent and prospect detection
+var GOODBYE_PHRASES = /\b(goodbye|bye bye|bye|take care|talk tomorrow|talk soon|have a great day|have a good day|welcome to the family|see you|speak soon|look forward to speaking|thank you for your time|thanks for your time|nice talking|nice to talk|good night|have a good one)\b/i;
+
 function cleanForTTS(text) {
   return text
     // Strip Sales360 metadata JSON block — never speak aloud
@@ -233,6 +236,8 @@ class RealtimePipeline extends EventEmitter {
     this._turnController          = null;
     this._awaitingPlaybackMark    = false;  // Patch E
     this._lastTurnWasInterruption = false;
+    this._agentSaidGoodbye        = false;  // call termination
+    this._prospectSaidGoodbye     = false;  // call termination
   }
 
   async start() {
@@ -305,6 +310,19 @@ class RealtimePipeline extends EventEmitter {
       console.log('[Pipeline] Already processing — skipping: "' + utterance + '"');
       return;
     }
+
+    // Detect prospect goodbye
+    if (GOODBYE_PHRASES.test(utterance)) {
+      this._prospectSaidGoodbye = true;
+      console.log('[Pipeline] Prospect said goodbye: "' + utterance + '"');
+      // If agent already said goodbye, this is the acknowledgement — terminate after agent responds
+      if (this._agentSaidGoodbye) {
+        console.log('[Pipeline] Both parties said goodbye — terminating after agent acknowledgement');
+        var self = this;
+        setTimeout(function() { self._endCall(); }, 5000);
+      }
+    }
+
     if (this._audio) {
       this._audio.clearOutbound();
       console.log('[Pipeline] Outbound buffer cleared — turn complete');
@@ -324,6 +342,30 @@ class RealtimePipeline extends EventEmitter {
       this._agentResponding      = false;
       this.emit('playback:complete', { mark: name, callSid: this.callSid });
     }
+  }
+
+  // End the call via Twilio REST API when agent says goodbye
+  _endCall() {
+    var sid   = process.env.TWILIO_ACCOUNT_SID;
+    var token = process.env.TWILIO_AUTH_TOKEN;
+    if (!sid || !token || !this.callSid) return;
+
+    var callSid = this.callSid;
+    var url = 'https://api.twilio.com/2010-04-01/Accounts/' + sid + '/Calls/' + callSid + '.json';
+    var auth = 'Basic ' + Buffer.from(sid + ':' + token).toString('base64');
+
+    fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': auth,
+        'Content-Type':  'application/x-www-form-urlencoded',
+      },
+      body: 'Status=completed',
+    }).then(function(res) {
+      console.log('[Pipeline] Call terminated via REST API — status=' + res.status + ' callSid=' + callSid);
+    }).catch(function(err) {
+      console.error('[Pipeline] Failed to terminate call:', err.message);
+    });
   }
 
   _startKeepalive() {
@@ -437,6 +479,18 @@ class RealtimePipeline extends EventEmitter {
       console.log('[Pipeline] Turn complete turn=' + turnId);
       self.emit('turn:response', { turnId: turnId, callSid: self.callSid, text: cleanFull });
       self.emit('turn:end', { callSid: self.callSid, metrics: m });
+
+      // Detect agent goodbye — set flag, wait for prospect to acknowledge
+      if (GOODBYE_PHRASES.test(cleanFull)) {
+        self._agentSaidGoodbye = true;
+        console.log('[Pipeline] Agent said goodbye — waiting for prospect acknowledgement');
+        // If prospect already said goodbye, terminate now
+        if (self._prospectSaidGoodbye) {
+          console.log('[Pipeline] Both parties said goodbye — terminating call in 3s');
+          setTimeout(function() { self._endCall(); }, 3000);
+        }
+      }
+
       self._isProcessing = false;
     });
 
