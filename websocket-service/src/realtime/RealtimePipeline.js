@@ -281,7 +281,15 @@ class RealtimePipeline extends EventEmitter {
     });
 
     this._stt.on('speechStarted', function() {
-      if (!self._openingDone || self._agentResponding) return;
+      if (!self._openingDone) return;
+
+      // Patch B Step 1: caller started speaking while agent audio is active
+      // or Twilio still has buffered playback.
+      if (self._agentResponding || self._awaitingPlaybackMark) {
+        console.log('[Pipeline] BARGE-IN detected — caller spoke during agent playback');
+        self._handleBargeIn();
+      }
+
       // Patch H: t0 = caller starts speaking (true turn start)
       if (!self._metrics.currentTurn) {
         self._metrics.startTurn();
@@ -349,6 +357,44 @@ class RealtimePipeline extends EventEmitter {
     this.emit('turn:transcript', { callSid: this.callSid, text: utterance, isFinal: true });
     console.log('[Pipeline] Sending to Claude: "' + utterance + '"');
     this._respond(utterance);
+  }
+
+  // Patch B Step 1: stop the active agent response and immediately return
+  // conversational control to the caller.
+  _handleBargeIn() {
+    console.log('[Pipeline] Handling barge-in CallSid=' + this.callSid);
+
+    // Stop any audio Twilio has already buffered.
+    if (this._audio) {
+      this._audio.clearOutbound();
+    }
+
+    // Abort the shared generation chain: Claude SSE -> chunker -> ElevenLabs.
+    if (this._currentCtx && !this._currentCtx.aborted) {
+      this._currentCtx.abort('barge-in');
+    }
+
+    // The interrupted playback mark is no longer a valid completion signal.
+    this._awaitingPlaybackMark = false;
+    this._agentResponding = false;
+    this._isProcessing = false;
+
+    if (this._metrics.currentTurn) {
+      this._metrics.annotate({
+        bargedIn: true,
+        interruptedAt: Date.now(),
+      });
+    }
+
+    this._lastTurnWasInterruption = true;
+
+    this.emit('barge-in', {
+      callSid: this.callSid,
+      turnId: this._currentCtx ? this._currentCtx.turnId : null,
+      timestamp: Date.now(),
+    });
+
+    console.log('[Pipeline] BARGE-IN complete — listening to caller');
   }
 
   // Patch E: called when Twilio echoes back a mark — confirms audio played to that point
