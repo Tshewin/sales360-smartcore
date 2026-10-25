@@ -91,6 +91,9 @@ class TurnCompletionController {
     this.committed             = false;
     this.expectedResponseShape = 'unknown';
     this.speechActive          = false;  // Patch A: track VAD speech state
+    this.recoveryTimer         = null;
+    this.recoveryDelayMs       = 1800;
+    this.lastSpeechActivityAt  = 0;
   }
 
   setExpectedResponseShape(shape) {
@@ -103,10 +106,15 @@ class TurnCompletionController {
     if (!text) return;
 
     if (!event.isFinal) {
+      this.lastSpeechActivityAt = Date.now();
       this.latestInterim = text;
+      this._cancelRecovery();
       return;
     }
 
+    if (this.committed) return;
+    this._cancelRecovery();
+    this.lastSpeechActivityAt = Date.now();
     this.finalSegments.push(text);
     this.latestInterim = '';
 
@@ -118,7 +126,13 @@ class TurnCompletionController {
 
   onSpeechStarted() {
     this.speechActive = true;  // Patch A: prospect is speaking
+    this.lastSpeechActivityAt = Date.now();
     this._cancelPendingCommit();
+    // Repeated VAD starts must not strand already-finalised speech forever.
+    // Recovery only commits if no new interim/final speech arrives.
+    if (this.finalSegments.length && !this.latestInterim && !this.committed) {
+      this._scheduleRecovery();
+    }
   }
 
   onUtteranceEnd() {
@@ -139,10 +153,12 @@ class TurnCompletionController {
 
   reset() {
     this._cancelPendingCommit();
+    this._cancelRecovery();
     this.finalSegments = [];
     this.latestInterim = '';
     this.committed     = false;
     this.speechActive  = false;  // Patch A
+    this.lastSpeechActivityAt = 0;
   }
 
   _getUtterance() {
@@ -151,6 +167,7 @@ class TurnCompletionController {
 
   _scheduleCandidateCommit() {
     this._cancelPendingCommit();
+    this._cancelRecovery();
     var utterance = this._getUtterance();
     var delay     = this._chooseGracePeriod(utterance);
     console.log('[TurnController] Candidate commit in ' + delay + 'ms for: "' + utterance + '"');
@@ -175,6 +192,7 @@ class TurnCompletionController {
     if (!utterance || this.committed) return;
     this.committed = true;
     this._cancelPendingCommit();
+    this._cancelRecovery();
     console.log('[TurnController] Committed: "' + utterance + '"');
     this.onTurnComplete(utterance);
   }
@@ -184,6 +202,34 @@ class TurnCompletionController {
       clearTimeout(this.commitTimer);
       this.commitTimer = null;
     }
+  }
+
+  _cancelRecovery() {
+    if (this.recoveryTimer) {
+      clearTimeout(this.recoveryTimer);
+      this.recoveryTimer = null;
+    }
+  }
+
+  _scheduleRecovery() {
+    this._cancelRecovery();
+    var self = this;
+    this.recoveryTimer = setTimeout(function() {
+      self.recoveryTimer = null;
+      // Never force-commit an incomplete phrase or an active interim.
+      var text = self._getUtterance();
+      // A fresh VAD/transcript event must postpone recovery. A stale VAD
+      // speechActive flag alone cannot block recovery forever.
+      var quietForMs = Date.now() - self.lastSpeechActivityAt;
+      if (quietForMs < self.recoveryDelayMs) {
+        self._scheduleRecovery();
+        return;
+      }
+      if (!self.committed && !self.latestInterim && text && !self._looksIncomplete(text)) {
+        console.log('[TurnController] Recovery commit after repeated SpeechStarted');
+        self._commit();
+      }
+    }, this.recoveryDelayMs);
   }
 
   _isImmediateAnswer(text) {
@@ -283,8 +329,8 @@ class RealtimePipeline extends EventEmitter {
     this._stt.on('speechStarted', function() {
       if (!self._openingDone) return;
 
-      // Patch B Step 1: caller started speaking while agent audio is active
-      // or Twilio still has buffered playback.
+      // Patch B: SpeechStarted while agent audio is flowing (or Twilio still
+      // has buffered playback) is a real barge-in. Do NOT suppress this event.
       if (self._agentResponding || self._awaitingPlaybackMark) {
         console.log('[Pipeline] BARGE-IN detected — caller spoke during agent playback');
         self._handleBargeIn();
@@ -322,6 +368,57 @@ class RealtimePipeline extends EventEmitter {
     }
   }
 
+  // Patch B: stop current agent playback/generation as soon as the caller
+  // starts speaking. The shared GenerationContext abort propagates to Claude,
+  // SpeakableTextChunker and ElevenLabsWS; Twilio clear stops buffered audio.
+  _handleBargeIn() {
+    console.log('[Pipeline] Handling barge-in CallSid=' + this.callSid);
+
+    var interruptedTurnId = this._currentCtx ? this._currentCtx.turnId : null;
+
+    // Stop audio that Twilio has already buffered for playback.
+    if (this._audio) {
+      this._audio.clearOutbound();
+    }
+
+    // Abort the active generation chain. GenerationContext is shared by
+    // Claude SSE, the chunker and ElevenLabs for normal response turns.
+    if (this._currentCtx && !this._currentCtx.aborted) {
+      this._currentCtx.abort('barge-in');
+    }
+
+    // Discard the previous committed turn before accepting caller continuation.
+    // Otherwise the next final transcript is appended to the old utterance.
+    if (this._turnController) this._turnController.reset();
+    this._pendingContinuation = null;
+
+    // Any playback mark belonging to the interrupted response is stale.
+    this._awaitingPlaybackMark = false;
+    this._agentResponding = false;
+
+    // Release the processing lock so the caller's newly completed utterance
+    // can create the next response generation.
+    this._isProcessing = false;
+
+    if (this._metrics.currentTurn) {
+      this._metrics.annotate({
+        bargedIn: true,
+        interruptedAt: Date.now(),
+      });
+    }
+
+    this._lastTurnWasInterruption = true;
+
+    // MediaStreamHandler already listens for this event.
+    this.emit('barge-in', {
+      callSid: this.callSid,
+      turnId: interruptedTurnId,
+      timestamp: Date.now(),
+    });
+
+    console.log('[Pipeline] BARGE-IN complete — listening to caller');
+  }
+
   _onTurnComplete(utterance) {
     // Patch F: If agent is currently responding, preserve utterance as continuation
     // Will be processed after TTS completes — no speech lost
@@ -357,44 +454,6 @@ class RealtimePipeline extends EventEmitter {
     this.emit('turn:transcript', { callSid: this.callSid, text: utterance, isFinal: true });
     console.log('[Pipeline] Sending to Claude: "' + utterance + '"');
     this._respond(utterance);
-  }
-
-  // Patch B Step 1: stop the active agent response and immediately return
-  // conversational control to the caller.
-  _handleBargeIn() {
-    console.log('[Pipeline] Handling barge-in CallSid=' + this.callSid);
-
-    // Stop any audio Twilio has already buffered.
-    if (this._audio) {
-      this._audio.clearOutbound();
-    }
-
-    // Abort the shared generation chain: Claude SSE -> chunker -> ElevenLabs.
-    if (this._currentCtx && !this._currentCtx.aborted) {
-      this._currentCtx.abort('barge-in');
-    }
-
-    // The interrupted playback mark is no longer a valid completion signal.
-    this._awaitingPlaybackMark = false;
-    this._agentResponding = false;
-    this._isProcessing = false;
-
-    if (this._metrics.currentTurn) {
-      this._metrics.annotate({
-        bargedIn: true,
-        interruptedAt: Date.now(),
-      });
-    }
-
-    this._lastTurnWasInterruption = true;
-
-    this.emit('barge-in', {
-      callSid: this.callSid,
-      turnId: this._currentCtx ? this._currentCtx.turnId : null,
-      timestamp: Date.now(),
-    });
-
-    console.log('[Pipeline] BARGE-IN complete — listening to caller');
   }
 
   // Patch E: called when Twilio echoes back a mark — confirms audio played to that point
@@ -544,6 +603,7 @@ class RealtimePipeline extends EventEmitter {
     });
 
     tts.on('done', function() {
+      if (ctx.aborted || self._currentCtx !== ctx) return;
       self._agentResponding = false;
       ctx.complete();
       var cleanFull = cleanForTTS(fullResponse);
@@ -581,6 +641,7 @@ class RealtimePipeline extends EventEmitter {
     });
 
     tts.on('error', function(e) {
+      if (ctx.aborted || self._currentCtx !== ctx) return;
       self._agentResponding = false;
       console.error('[Pipeline] TTS error turn=' + turnId + ':', e.error && e.error.message);
       self._isProcessing = false;
